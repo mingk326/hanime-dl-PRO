@@ -1,75 +1,129 @@
-# Hanime Downloader
+# Hanime Downloader V2
 
-> ⚠️ **提示**：本项目由 AI 完全编写，**未经任何人工校对**。代码、文档及功能可能存在错误、缺陷或不完善之处，使用时请自行评估风险并谨慎测试。
+> 基于 [mingjiezxc/hanime-dl](https://github.com/mingjiezxc/hanime-dl) 的增强版本，新增完成记录、文件校验、失败日志、自动重试等可靠性功能。
 
-Hanime 视频下载工具，使用 Chrome DevTools Protocol 进行网页抓取和下载。
+Hanime 视频下载工具，使用 Chrome DevTools Protocol 进行网页抓取，支持 CLI 和 Web 两种模式。
 
-## 🌐 语言选择
+## V2 新增特性
 
-- 🇨🇳 [简体中文](#--简体中文)
-- 🇬🇧 [English](#-english)
+相对原项目，V2 做了以下改进：
 
----
+### 1. 修复 403/404 卡死问题
 
-## 📦 最新版本：v0.4.6 (2026-07-19)
+原项目遇到 403/404 时会卡住等待 50 分钟超时。V2 通过 HTTP 状态码监听实现 20 秒内快速失败。
 
-### 新增特性
-- ✨ **Web 管理界面** - 提供可视化的视频下载管理界面
-- 🎨 **现代化 UI** - 基于 HTML/CSS/JavaScript 的响应式设计
-- 📊 **实时进度显示** - 可视化显示下载进度和状态
-- 🔄 **批量操作** - 支持通过 Web 界面批量管理下载任务
+| 对比项 | 原项目 | V2 |
+|--------|--------|-----|
+| 403/404 超时时间 | 50 分钟 | 20 秒 |
+| 403/404 重试 | 5 次无效重试 | 立即失败，不重试 |
 
-### 更新内容
-- 重构项目结构，采用模块化设计
-- 新增 `web/` 模块提供 Web 服务器功能
-- 新增 `chrome/` 模块独立 Chrome 浏览器管理
-- 新增 `scraper/` 模块独立网页抓取逻辑
-- 新增 `downloader/` 模块独立文件下载逻辑
-- 新增 `config/` 模块独立配置管理
+### 2. 完成记录系统（registry 包）
 
-### v0.4.6 修复 (2026-07-19)
-- 🐛 **目录自动创建** - 修复下载时目标父目录（如 `download/<影片名>/`）不存在导致临时文件创建失败的问题，现会在写入前自动 `MkdirAll` 父目录
-- 🐛 **新标签页代替新窗口** - 修复 chromedp 在远程浏览器下每次抓取都会打开「新窗口」的问题，改为在已有浏览器中打开「新标签页」（新增 `chrome.CreateTab()`，`scraper` 通过 `WithTargetID` 附着，任务结束自动关闭标签页）
+下载完成后记录视频信息到 `./Completed/` 目录，每个视频一个独立的 `{videoID}.json` 文件。重新运行程序时，已下载的视频**零网络请求**直接跳过。
+
+**三层校验确保记录准确性：**
+1. 记录存在且分辨率匹配
+2. `os.Stat` 确认 MP4 和 JPG 文件都存在
+3. 实际文件大小与记录一致
+
+**严格写入条件：** 只有 MP4 + JPG 都下载完成且通过 `verifier` 校验后才写入记录。任一检查失败则拒绝写入，并记录原因到 `./log/Completed-log.txt`。
+
+### 3. 文件完整性校验（verifier 包）
+
+下载完成后自动校验文件完整性，防止保存 HTML 错误页或损坏文件。
+
+| 格式 | 校验规则 | 检测问题 |
+|------|---------|---------|
+| MP4 | 大小 > 10KB + 偏移 4-7 字节为 `ftyp` | HTML 错误页、空文件、损坏文件 |
+| JPG | 大小 > 100B + 前 2 字节为 `FF D8` | HTML 错误页、空文件、损坏文件 |
+
+校验失败且判定为损坏时自动删除文件，触发重新下载。
+
+### 4. 双日志系统（failurelog 包）
+
+```
+./log/
+  ├── Download-log.txt    ← 下载失败日志（解析失败、下载失败、校验失败、重试耗尽）
+  └── Completed-log.txt   ← 记录拒绝日志（MP4/JPG 缺失或校验失败导致拒绝写入完成记录）
+```
+
+两个日志各有独立 mutex，互不干扰，格式统一为 `[时间] videoID=<ID> reason=<原因>`。
+
+### 5. 自动重试机制
+
+下载失败后自动重试，每次重试前重新解析视频信息获取新的下载 URL（旧 URL 可能已过期）。
+
+- 配置项 `MaxRetryAttempts`（默认 3）
+- 线性退避：第 1 次 10s，第 2 次 20s，第 3 次 30s
+- 三种失败都触发重试：解析失败、下载失败、校验失败
+- 中间失败不写日志，只有最终失败才记录到 `Download-log.txt`
+
+### 6. Windows 文件名安全化
+
+- 替换 9 个 Windows 非法字符（`< > : " / \ | ? *`）及控制字符为 `_`
+- UTF-8 安全截断到 200 字节（不会在多字节字符中间截断）
+- 去除末尾空格和点号
+- 文件名添加 `[视频ID]` 前缀，如 `[407238][CEO NEET (ニート社長)] 标题.mp4`
+
+### 7. 六层中断恢复机制
+
+| 层级 | 触发场景 | 恢复方式 |
+|------|---------|---------|
+| HTTP 断点续传 | 网络中断 | 从 `.tmp` 文件断点继续 |
+| 下载器重试 | 408/429/5xx | 间隔 5s/15s 重试 |
+| URL 刷新 | 410 URL 过期 | 刷新 URL 后重试 |
+| 应用层重试 | 解析/下载/校验失败 | 重新解析 + 下载，退避 10-30s |
+| 程序重启恢复 | 程序崩溃 | 扫描缓存文件恢复任务 |
+| 文件校验修复 | 文件损坏 | 删除损坏文件后重下 |
 
 ## 功能特性
 
-- 🎬 支持单个视频下载
-- 📋 支持播放列表批量下载
-- 🔄 支持断点续传
-- 📦 支持下载进度缓存
-- 🌐 支持代理配置
-- 🎨 支持多分辨率选择
-- ⚡ 支持多线程并发下载
+- 单个视频下载 / 播放列表批量下载
+- CLI 模式 / Web 管理界面
+- 断点续传（HTTP Range）
+- HTTP 代理配置
+- 多分辨率选择
+- 多线程并发下载
+- 下载进度缓存与中断恢复
+- 已完成视频记录与快速跳过
+- 文件完整性校验
+- 双日志系统（下载失败 + 记录拒绝）
+- 自动重试与 URL 刷新
 
 ## 项目结构
 
 ```
-hanime-dl/
-├── main.go              # 主程序入口
+hanime-dl-v2/
+├── main.go                    # 主程序入口（CLI 模式）
 ├── config/
-│   └── config.go        # 配置管理模块
+│   └── config.go              # 配置管理
 ├── chrome/
-│   └── chrome.go        # Chrome 浏览器管理模块
+│   ├── chrome.go              # Chrome 浏览器管理（跨平台接口）
+│   ├── chrome_unix.go         # Unix 平台实现
+│   └── chrome_windows.go      # Windows 平台实现
 ├── scraper/
-│   └── scraper.go       # 网页抓取模块
+│   └── scraper.go             # 网页抓取（视频信息解析）
 ├── downloader/
-│   └── downloader.go    # 文件下载模块
+│   └── downloader.go          # 文件下载（断点续传、重试）
+├── verifier/                  # [新增] 文件完整性校验
+│   ├── verifier.go
+│   └── verifier_test.go
+├── registry/                  # [新增] 已完成视频记录
+│   ├── registry.go
+│   └── registry_test.go
+├── failurelog/                # [增强] 双日志系统
+│   ├── failurelog.go
+│   └── failurelog_test.go
 ├── web/
-│   └── web_server.go    # Web 服务器模块
-├── config.yaml          # 配置文件
-├── go.mod               # Go 模块定义
-└── README.md            # 项目说明
+│   ├── web_server.go          # Web 服务器
+│   └── index.html             # Web 界面
+├── ubuntu-desktop/            # Docker 桌面环境
+│   ├── Dockerfile
+│   └── docker-compose.yaml
+├── config.yaml                # 配置文件
+├── go.mod
+└── README.md
 ```
-
-### 模块说明
-
-| 模块 | 功能 | 主要函数 |
-|------|------|----------|
-| `config` | 配置管理 | `Load()`, `MustLoad()` |
-| `chrome` | Chrome 浏览器管理 | `GetWebSocketDebuggerURL()`, `AutoDetectChrome()`, `StartLocalChrome()`, `CreateTab()` |
-| `scraper` | 网页抓取 | `GetPlaylist()`, `ResolveVideoInfo()`, `RefreshVideoDataURL()` |
-| `downloader` | 文件下载 | `DownloadFile()`, `DownloadWithRetry()` |
-| `web` | Web 服务器 | `RunWebServer()`, `NewWebServer()` |
 
 ## 安装
 
@@ -81,20 +135,22 @@ hanime-dl/
 ### 编译
 
 ```bash
-# 克隆项目
-git clone <repository-url>
-cd hanime-dl
-
-# 下载依赖
+git clone https://github.com/mingk326/hanime-dl-v2.git
+cd hanime-dl-v2
 go mod download
-
-# 编译
 go build -o hanime-dl .
+```
+
+Windows 交叉编译：
+
+```bash
+$env:GOOS='windows'; $env:GOARCH='amd64'
+go build -ldflags="-s -w" -o hanime-dl-windows-amd64.exe .
 ```
 
 ## 配置
 
-编辑 `config.yaml` 文件：
+编辑 `config.yaml`：
 
 ```yaml
 # Chrome 远程调试 URL
@@ -106,49 +162,52 @@ CacheDir: ./cache
 # 下载目录
 DownDir: ./downloads
 
-# HTTP 代理（可选）
-HttpProxy: http://proxy.example.com:8080
+# 已完成视频记录目录（每个视频一个 {videoID}.json）
+RegistryDir: ./Completed
 
-# 是否优先尝试直接下载
-DirectDownloadFirst: true
+# 视频分辨率
+VideoResolution: 1080p
 
 # 最大并发下载线程数
 MaxDownloadWorkers: 3
 
-# 播放列表 ID 列表
-ListCode:
-  - "playlist-id-1"
-  - "playlist-id-2"
+# 单个视频失败后最大重试次数（0=不重试）
+MaxRetryAttempts: 3
 
-# 单个视频 ID 列表
-SingleCode:
-  - "video-id-1"
+# 是否优先尝试直接下载
+DirectDownloadFirst: true
 
 # 下载后清除缓存
 ClearCache: true
 
-# 视频分辨率（如：1080p, 720p）
-VideoResolution: 1080p
+# 播放列表 ID 列表
+ListCode:
+  - playlist-id-1
+
+# 单个视频 ID 列表
+SingleCode:
+  - video-id-1
 ```
 
 ### 配置项说明
 
-| 配置项 | 类型 | 说明 |
-|--------|------|------|
-| `chromeRemoteURL` | string | Chrome DevTools WebSocket URL |
-| `CacheDir` | string | 缓存目录路径 |
-| `DownDir` | string | 视频下载目录路径 |
-| `HttpProxy` | string | HTTP 代理地址（可选） |
-| `DirectDownloadFirst` | bool | 是否优先尝试直接下载 |
-| `MaxDownloadWorkers` | int | 并发下载线程数 |
-| `ListCode` | []string | 播放列表 ID 列表 |
-| `SingleCode` | []string | 单个视频 ID 列表 |
-| `ClearCache` | bool | 下载后是否清除缓存 |
-| `VideoResolution` | string | 目标视频分辨率 |
+| 配置项 | 类型 | 默认值 | 说明 |
+|--------|------|--------|------|
+| `chromeRemoteURL` | string | - | Chrome DevTools WebSocket URL |
+| `CacheDir` | string | `./cache` | 缓存目录路径 |
+| `DownDir` | string | `./downloads` | 视频下载目录路径 |
+| `RegistryDir` | string | `./Completed` | 已完成视频记录目录 |
+| `VideoResolution` | string | `1080p` | 目标视频分辨率 |
+| `MaxDownloadWorkers` | int | `3` | 并发下载线程数 |
+| `MaxRetryAttempts` | int | `3` | 单个视频失败后重试次数 |
+| `DirectDownloadFirst` | bool | `true` | 是否优先尝试直接下载 |
+| `ClearCache` | bool | `true` | 下载后是否清除缓存 |
+| `ListCode` | []string | - | 播放列表 ID 列表 |
+| `SingleCode` | []string | - | 单个视频 ID 列表 |
 
 ## 使用方法
 
-### 运行程序
+### CLI 模式
 
 ```bash
 # 使用默认配置
@@ -156,46 +215,27 @@ VideoResolution: 1080p
 
 # 指定配置文件
 ./hanime-dl -config /path/to/config.yaml
-
-# 查看帮助
-./hanime-dl -h
 ```
 
-### 命令行参数
-
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `-config` | `config.yaml` | 配置文件路径 |
-| `-web` | `false` | 启动 Web 服务器模式 |
-| `-web-addr` | `:8080` | Web 服务器地址 |
-
-### Web 界面使用 （推荐）
-
-启动 Web 服务器模式：
-直接如无配置CDP 或 连接失败 ,默认会启动本地 Chrome 实例,并连接到该实例
+### Web 模式（推荐）
 
 ```bash
-# 使用默认配置启动 Web 服务器
+# 启动 Web 服务器
 ./hanime-dl -web
 
 # 指定端口
 ./hanime-dl -web -web-addr :3000
 
-# 访问 Web 界面
-# 打开浏览器访问 http://localhost:8080
+# 访问 http://localhost:8080
 ```
 
 Web 界面功能：
-- 📱 响应式设计，支持移动端访问
-- 📋 查看下载队列和进度
-- ⚙️ 配置下载参数
-- 🎬 管理视频下载任务
-- 📊 实时显示下载状态
-
+- 查看下载队列和实时进度
+- 配置下载参数
+- 管理视频下载任务
+- 响应式设计，支持移动端访问
 
 ### Chrome 浏览器设置
-
-#### 方式 1：手动启动 Chrome（推荐）
 
 ```bash
 # Linux
@@ -208,217 +248,58 @@ google-chrome --remote-debugging-port=9222
 "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222
 ```
 
-#### 方式 2：使用 Docker 桌面环境
+或使用 Docker 桌面环境：
 
 ```bash
 cd ubuntu-desktop
 docker compose up -d
 ```
 
-#### 方式 3：配置远程 Chrome
+## 目录结构说明
 
-在 `config.yaml` 中设置远程 Chrome 地址：
+运行后会产生以下目录：
 
-```yaml
-chromeRemoteURL: http://your-chrome-host:9222/json/version
+```
+./
+├── cache/                    # 解析缓存（下载完成后自动清除）
+│   ├── list_<playlistID>.json
+│   └── info_<videoID>.json
+├── downloads/                # 下载的视频和封面
+│   └── [videoID]标题.mp4 / .jpg
+├── Completed/                # 已完成视频记录（永久保留）
+│   └── <videoID>.json
+└── log/                      # 日志目录
+    ├── Download-log.txt      # 下载失败日志
+    └── Completed-log.txt     # 记录拒绝日志
 ```
 
+## 单元测试
 
-## 工作流程
-
-```mermaid
-graph TD
-    A[启动程序] --> B[加载配置]
-    B --> C{连接 Chrome}
-    C -->|远程 URL| D[连接远程 Chrome]
-    C -->|本地检测 | E[扫描本地端口]
-    C -->|启动本地 | F[启动 Chrome 实例]
-    D --> G[创建抓取器和下载器]
-    E --> G
-    F --> G
-    G --> H[处理单个视频]
-    G --> I[处理播放列表]
-    H --> J[解析视频信息]
-    I --> J
-    J --> K[下载视频]
-    K --> L{下载成功？}
-    L -->|是 | M[清除缓存]
-    L -->|否 | N[重试]
-    M --> O[完成]
-    N --> K
-```
-
-## 缓存机制
-
-程序使用缓存来提高效率和支持断点续传：
-
-- **播放列表缓存**: `cache/list_<video-id>.json`
-- **视频信息缓存**: `cache/info_<video-id>.json`
-
-缓存文件包含：
-- 播放列表：视频 ID 列表
-- 视频信息：标题、封面图 URL、下载 URL、文件路径等
-
-设置 `ClearCache: true` 可在下载完成后自动清除缓存。
-
-## 错误处理
-
-程序包含完善的错误处理机制：
-
-- **自动重试**: 下载失败时自动重试最多 5 次
-- **断点续传**: 支持从上次中断的位置继续下载
-- **代理支持**: 支持 HTTP 代理，适用于网络受限环境
-- **分辨率降级**: 请求的分辨率不可用时自动降级到可用分辨率
-
-## 常见问题
-
-### Q: 无法连接到 Chrome
-
-**A**: 确保 Chrome 已启动并启用远程调试：
 ```bash
-google-chrome --remote-debugging-port=9222
+go test ./... -v
 ```
 
-### Q: 下载速度慢
+共 62 个测试用例，覆盖 registry、failurelog、scraper、verifier 四个包。
 
-**A**: 
-1. 检查代理配置是否正确
-2. 增加 `MaxDownloadWorkers` 值
-3. 尝试 `DirectDownloadFirst: false`
+## 与原项目的对比
 
-### Q: 视频分辨率不符合要求
-
-**A**: 设置 `VideoResolution` 为所需分辨率，如 `1080p`、`720p` 等。
-
-### Q: 如何继续中断的下载
-
-**A**: 程序会自动检测缓存并继续未完成的下载。只需重新运行程序即可。
-
-## 开发指南
-
-### 添加新功能
-
-1. 在对应模块中实现功能
-2. 在 `main.go` 中调用新函数
-3. 更新 `README.md` 文档
-
-### 代码规范
-
-- 使用 Go 标准格式化：`go fmt ./...`
-- 运行静态检查：`go vet ./...`
-- 添加单元测试（未来计划）
+| 维度 | 原项目 | V2 |
+|------|--------|-----|
+| 403/404 卡住时间 | 50 分钟 | 20 秒内 |
+| 下载失败追踪 | 仅控制台 | `Download-log.txt` 持久化 |
+| 文件完整性 | 不校验 | MP4/JPG 双重校验 |
+| 文件名安全性 | 仅替换 `/` `\` | 9 个非法字符 + UTF-8 截断 |
+| 文件名可识别性 | 仅标题 | `[视频ID]标题` |
+| 已下载跳过 | 需重新解析网页 | 零网络请求，瞬间跳过 |
+| 失败恢复 | 不重试 | 自动重试 3 次 + URL 刷新 |
+| 单元测试 | 0 个 | 62 个 |
 
 ## 许可证
 
 MIT License
 
-## 贡献
-
-欢迎提交 Issue 和 Pull Request！
-
 ## 致谢
 
+- [mingjiezxc/hanime-dl](https://github.com/mingjiezxc/hanime-dl) - 原项目
 - [chromedp](https://github.com/chromedp/chromedp) - Chrome DevTools Protocol 库
 - [gopkg.in/yaml.v3](https://gopkg.in/yaml.v3) - YAML 解析库
-
----
-
-## 🇬🇧 English
-
-### Latest Version: v0.4.6 (2026-07-19)
-
-#### What's New
-- ✨ **Web Management Interface** - Visual video download management
-- 🎨 **Modular Refactoring** - Clean project structure (chrome/, config/, scraper/, downloader/, web/)
-- 📊 **Real-time Progress** - Visual download status
-- 🔄 **Batch Operations** - Manage download tasks via Web interface
-
-#### Features
-- 🎬 Single video download support
-- 📋 Playlist batch download support
-- 🔄 Resume interrupted downloads
-- 📦 Download progress caching
-- 🌐 Proxy configuration support
-- 🎨 Multiple resolution options
-- ⚡ Multi-threaded concurrent downloads
-
-#### Quick Start
-
-**Prerequisites**
-- Go 1.19+
-- Google Chrome or Chromium browser
-
-**Build**
-```bash
-# Clone the repository
-git clone <repository-url>
-cd hanime-dl
-
-# Download dependencies
-go mod download
-
-# Build
-go build -o hanime-dl .
-```
-
-**Configuration**
-Edit `config.yaml`:
-```yaml
-chromeRemoteURL: http://localhost:9222/json/version
-CacheDir: ./cache
-DownDir: ./downloads
-HttpProxy: http://proxy.example.com:8080
-DirectDownloadFirst: true
-MaxDownloadWorkers: 3
-VideoResolution: 1080p
-```
-
-**Chrome Setup**
-```bash
-# Linux
-google-chrome --remote-debugging-port=9222
-
-# macOS
-"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --remote-debugging-port=9222
-
-# Windows
-"C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222
-```
-
-**Run**
-```bash
-# Default configuration
-./hanime-dl
-
-# Web server mode
-./hanime-dl -web -web-addr :8080
-
-# View help
-./hanime-dl -h
-```
-
-**Web Interface**
-Access `http://localhost:8080` for:
-- 📱 Responsive design (mobile-friendly)
-- 📋 View download queue and progress
-- ⚙️ Configure download parameters
-- 🎬 Manage video download tasks
-- 📊 Real-time download status
-
-#### Releases
-- **v0.4.6**: Bug fixes - auto-create download dirs, open new tab instead of new window (`CreateTab`)
-- **v0.4.1**: Modular refactoring, Web interface added
-- **v0.4.0**: Initial modular architecture
-- **v0.3.1**: Bug fixes and improvements
-
-Download binaries from [GitHub Releases](https://github.com/mingjiezxc/hanime-dl/releases)
-
-#### License
-MIT License
-
-#### Contributing
-Issues and Pull Requests are welcome!
-
-#### Acknowledgments
-- [chromedp](https://github.com/chromedp/chromedp) - Chrome DevTools Protocol library
-- [gopkg.in/yaml.v3](https://gopkg.in/yaml.v3) - YAML parsing library
