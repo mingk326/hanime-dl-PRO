@@ -294,6 +294,10 @@ go test ./... -v
 | 失败恢复 | 不重试 | 自动重试 3 次 + URL 刷新 |
 | 单元测试 | 0 个 | 62 个 |
 
+## 相关项目
+
+- [hanime-config-generator](https://github.com/mingk326/hanime-config-generator) - 在线配置文件生成工具，可视化生成 `config.yaml`
+
 ## 许可证
 
 MIT License
