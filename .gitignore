@@ -1,0 +1,33 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test artifacts
+failurelog/log/
+
+# Runtime data
+cache/
+downloads/
+Completed/
+log/
+*.tmp
+
+# Config (contains user-specific settings)
+config.yaml
+
+# Logs
+*.log
+log.txt
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
