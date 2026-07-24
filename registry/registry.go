@@ -12,7 +12,8 @@ import (
 )
 
 // Record 单个视频的完成记录。
-// 仅在 MP4 + JPG 都下载完成且通过 verifier 校验后才写入。
+// 正常下载：MP4 + JPG 都下载完成且通过 verifier 校验后写入，Demotion=false。
+// 降级下载：仅 MP4 下载完成即可写入，JPG 可选，Demotion=true。
 type Record struct {
 	VideoID     string `json:"video_id"`
 	Title       string `json:"title"`
@@ -21,6 +22,7 @@ type Record struct {
 	Mp4Size     int64  `json:"mp4_size"`
 	JpgSize     int64  `json:"jpg_size"`
 	Resolution  string `json:"resolution"`
+	Demotion    bool   `json:"demotion"` // true=降级下载，false=正常下载
 	CompletedAt string `json:"completed_at"`
 }
 
@@ -94,7 +96,7 @@ func (r *Registry) load() {
 // IsCompleted 三层校验判断视频是否已完成且文件真实存在。
 //
 // 第1层: 记录中存在该 videoID 且分辨率匹配
-// 第2层: os.Stat(mp4Path) 和 os.Stat(jpgPath) 都成功
+// 第2层: os.Stat(mp4Path) 成功（降级记录跳过 JPG 检查）
 // 第3层: 实际文件大小 == 记录的大小
 //
 // 任一层失败都会从记录中移除该条目（返回 needsRemove=true）。
@@ -119,16 +121,21 @@ func (r *Registry) IsCompleted(videoID, resolution string) (mp4Path, jpgPath str
 	if err != nil {
 		return "", "", false, true
 	}
-	jpgInfo, err := os.Stat(rec.JpgPath)
-	if err != nil {
-		return "", "", false, true
+
+	// 降级记录：JPG 可选，不存在不触发移除
+	if !rec.Demotion {
+		jpgInfo, err := os.Stat(rec.JpgPath)
+		if err != nil {
+			return "", "", false, true
+		}
+		// 第3层：JPG 文件大小匹配检查
+		if jpgInfo.Size() != rec.JpgSize {
+			return "", "", false, true
+		}
 	}
 
-	// 第3层：文件大小匹配检查
+	// 第3层：MP4 文件大小匹配检查
 	if mp4Info.Size() != rec.Mp4Size {
-		return "", "", false, true
-	}
-	if jpgInfo.Size() != rec.JpgSize {
 		return "", "", false, true
 	}
 
@@ -175,6 +182,49 @@ func (r *Registry) Record(videoID, title, mp4Path, jpgPath, resolution string) e
 		Mp4Size:     mp4Size,
 		JpgSize:     jpgSize,
 		Resolution:  resolution,
+		CompletedAt: time.Now().Format("2006-01-02 15:04:05"),
+	}
+
+	r.mu.Lock()
+	r.records[videoID] = rec
+	err = r.saveRecordLocked(videoID, rec)
+	r.mu.Unlock()
+
+	return err
+}
+
+// RecordDemotion 写入一条降级下载完成记录。
+// 降级下载只要求 MP4 存在且大小 > 0，JPG 可选（有则记录，无则留空）。
+// JSON 中 Demotion 字段标记为 true，便于区分正常下载和降级下载。
+func (r *Registry) RecordDemotion(videoID, title, mp4Path, jpgPath, resolution string) error {
+	// === 严格检查：MP4 必须存在且大小 > 0 ===
+	mp4Size, err := fileSize(mp4Path)
+	if err != nil {
+		return fmt.Errorf("mp4 文件不存在，拒绝写入降级记录: %w", err)
+	}
+	if mp4Size <= 0 {
+		return fmt.Errorf("mp4 文件大小为 0，拒绝写入降级记录: %s", mp4Path)
+	}
+
+	// JPG 可选：有则记录大小，无则留空
+	var jpgSize int64
+	if jpgPath != "" {
+		if size, err := fileSize(jpgPath); err == nil && size > 0 {
+			jpgSize = size
+		} else {
+			jpgPath = "" // JPG 不存在或为空，清空路径
+		}
+	}
+
+	rec := Record{
+		VideoID:     videoID,
+		Title:       title,
+		Mp4Path:     mp4Path,
+		JpgPath:     jpgPath,
+		Mp4Size:     mp4Size,
+		JpgSize:     jpgSize,
+		Resolution:  resolution,
+		Demotion:    true,
 		CompletedAt: time.Now().Format("2006-01-02 15:04:05"),
 	}
 
