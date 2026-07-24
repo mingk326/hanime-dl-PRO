@@ -696,19 +696,27 @@ func (ws *WebServer) processSingleTask(workerID int, task *TaskStatus) {
 				meta.DataURL = link.URL
 
 				// 下载封面图（如果还没有）
-				if meta.ImageURL != "" && meta.ImageFilePath != "" {
-					if _, e := os.Stat(meta.ImageFilePath); os.IsNotExist(e) {
-						ws.downloader.DownloadWithRetry(meta.ImageURL, meta.ImageFilePath)
+			if meta.ImageURL != "" && meta.ImageFilePath != "" {
+				if _, e := os.Stat(meta.ImageFilePath); os.IsNotExist(e) {
+					log.Printf("[Worker %d] Fallback: downloading cover image for %s from %s",
+						workerID, task.VideoID, meta.ImageURL)
+					if imgErr := ws.downloader.DownloadWithRetry(meta.ImageURL, meta.ImageFilePath); imgErr != nil {
+						log.Printf("[Worker %d] Fallback image download failed for %s: %v", workerID, task.VideoID, imgErr)
+						failurelog.Log(task.VideoID, fmt.Sprintf("降级下载: 封面图下载失败 %v", imgErr))
 					}
-					if _, e := os.Stat(meta.ImageFilePath); e == nil {
-						if vErr := verifier.Verify(meta.ImageFilePath); vErr != nil {
-							log.Printf("[Worker %d] Fallback image verify failed: %v", workerID, vErr)
-							if verifier.IsCorrupt(vErr) {
-								os.Remove(meta.ImageFilePath)
-							}
+				}
+				if _, e := os.Stat(meta.ImageFilePath); e == nil {
+					if vErr := verifier.Verify(meta.ImageFilePath); vErr != nil {
+						log.Printf("[Worker %d] Fallback image verify failed: %v", workerID, vErr)
+						if verifier.IsCorrupt(vErr) {
+							os.Remove(meta.ImageFilePath)
 						}
 					}
 				}
+			} else {
+				log.Printf("[Worker %d] Fallback: no ImageURL or ImageFilePath for %s (ImageURL=%s, ImageFilePath=%s)",
+					workerID, task.VideoID, meta.ImageURL, meta.ImageFilePath)
+			}
 
 				videoSuccess = true
 				break

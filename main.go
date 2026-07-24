@@ -328,21 +328,29 @@ func main() {
 						currentMeta.DataURL = link.URL
 
 						// 下载封面图（如果还没有）
-						if currentMeta.ImageURL != "" && currentMeta.ImageFilePath != "" {
-							if _, err := os.Stat(currentMeta.ImageFilePath); os.IsNotExist(err) {
-								if imgErr := d.DownloadWithRetry(currentMeta.ImageURL, currentMeta.ImageFilePath); imgErr != nil {
-									log.Printf("[Worker %d] Fallback image download failed for %s: %v", workerId, currentMeta.VideoID, imgErr)
-								}
+					if currentMeta.ImageURL != "" && currentMeta.ImageFilePath != "" {
+						if _, err := os.Stat(currentMeta.ImageFilePath); os.IsNotExist(err) {
+							log.Printf("[Worker %d] Fallback: downloading cover image for %s from %s",
+								workerId, currentMeta.VideoID, currentMeta.ImageURL)
+							if imgErr := d.DownloadWithRetry(currentMeta.ImageURL, currentMeta.ImageFilePath); imgErr != nil {
+								log.Printf("[Worker %d] Fallback image download failed for %s: %v", workerId, currentMeta.VideoID, imgErr)
+								// 记录到失败日志
+								failurelog.Log(currentMeta.VideoID,
+									fmt.Sprintf("降级下载: 封面图下载失败 %v", imgErr))
 							}
-							if _, err := os.Stat(currentMeta.ImageFilePath); err == nil {
-								if vErr := verifier.Verify(currentMeta.ImageFilePath); vErr != nil {
-									log.Printf("[Worker %d] Fallback image verify failed: %v", workerId, vErr)
-									if verifier.IsCorrupt(vErr) {
-										os.Remove(currentMeta.ImageFilePath)
-									}
+						}
+						if _, err := os.Stat(currentMeta.ImageFilePath); err == nil {
+							if vErr := verifier.Verify(currentMeta.ImageFilePath); vErr != nil {
+								log.Printf("[Worker %d] Fallback image verify failed: %v", workerId, vErr)
+								if verifier.IsCorrupt(vErr) {
+									os.Remove(currentMeta.ImageFilePath)
 								}
 							}
 						}
+					} else {
+						log.Printf("[Worker %d] Fallback: no ImageURL or ImageFilePath for %s (ImageURL=%s, ImageFilePath=%s)",
+							workerId, currentMeta.VideoID, currentMeta.ImageURL, currentMeta.ImageFilePath)
+					}
 
 						videoSuccess = true
 						break

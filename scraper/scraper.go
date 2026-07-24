@@ -673,9 +673,8 @@ func (s *Scraper) FallbackResolveDownloadURLs(wsURL, videoID string) ([]Resoluti
 		}
 	}
 
-	// 4. 提取所有下载链接和封面图 URL
+	// 4. 提取所有下载链接（独立执行，不受图片提取影响）
 	var rawLinks []map[string]string
-	var imageURL string
 	err = chromedp.Run(ctx,
 		chromedp.WaitVisible(`table.download-table`, chromedp.ByQuery),
 		chromedp.Sleep(1*time.Second),
@@ -692,8 +691,6 @@ func (s *Scraper) FallbackResolveDownloadURLs(wsURL, videoID string) ([]Resoluti
 				return null;
 			}).filter(x => x !== null)
 		`, &rawLinks),
-		// 同时提取下载页面上的封面图 URL（img.download-image 的 src 属性）
-		chromedp.AttributeValue(downloadImageSelector, "src", &imageURL, nil, chromedp.ByQuery),
 	)
 	if err != nil {
 		return nil, "", fmt.Errorf("fallback: extract download links failed: %w", err)
@@ -701,6 +698,45 @@ func (s *Scraper) FallbackResolveDownloadURLs(wsURL, videoID string) ([]Resoluti
 
 	if len(rawLinks) == 0 {
 		return nil, "", fmt.Errorf("fallback: no download links found")
+	}
+
+	// 4.5 提取封面图 URL（非致命，失败不影响下载链接）
+	//     优先从下载页面的 img.download-image 获取
+	//     如果下载页面没有，尝试从 watch 页面的视频缩略图获取
+	var imageURL string
+	_ = chromedp.Run(ctx,
+		chromedp.Evaluate(`(function() {
+			var img = document.querySelector('img.download-image');
+			if (img && img.src) { return img.src; }
+			return "";
+		})()`, &imageURL),
+	)
+
+	// 如果下载页面没有封面图，尝试从 watch 页面的搜索结果获取
+	if imageURL == "" {
+		log.Printf("Fallback: no cover image on download page, trying search for %s", videoID)
+		searchURL := fmt.Sprintf("https://hanime1.me/search?query=%s&type=&genre=&sort=&date=&duration=",
+			url.QueryEscape(videoID))
+		_ = chromedp.Run(ctx,
+			chromedp.Navigate(searchURL),
+			chromedp.Sleep(2*time.Second),
+			chromedp.Evaluate(fmt.Sprintf(`
+				(function() {
+					var link = document.querySelector("a[href*='watch?v=%s']");
+					if (link) {
+						var img = link.querySelector("img");
+						if (img && img.src) { return img.src; }
+					}
+					return "";
+				})()
+			`, videoID), &imageURL),
+		)
+	}
+
+	if imageURL != "" {
+		log.Printf("Fallback: extracted cover image URL for %s: %s", videoID, imageURL)
+	} else {
+		log.Printf("Fallback: no cover image URL found for %s", videoID)
 	}
 
 	// 5. 按分辨率优先级排序（从配置分辨率开始，逐级降级到 240p）
@@ -720,10 +756,6 @@ func (s *Scraper) FallbackResolveDownloadURLs(wsURL, videoID string) ([]Resoluti
 		len(sortedLinks), videoID, s.resolution)
 	for i, l := range sortedLinks {
 		log.Printf("Fallback: [%d] %s for %s", i+1, l.Resolution, videoID)
-	}
-
-	if imageURL != "" {
-		log.Printf("Fallback: extracted cover image URL for %s", videoID)
 	}
 
 	return sortedLinks, imageURL, nil
