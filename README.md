@@ -23,10 +23,13 @@ Hanime 视频下载工具，使用 Chrome DevTools Protocol 进行网页抓取�
 
 **三层校验确保记录准确性：**
 1. 记录存在且分辨率匹配
-2. `os.Stat` 确认 MP4 和 JPG 文件都存在
+2. `os.Stat` 确认 MP4 文件存在（正常记录还需 JPG 存在）
 3. 实际文件大小与记录一致
 
-**严格写入条件：** 只有 MP4 + JPG 都下载完成且通过 `verifier` 校验后才写入记录。任一检查失败则拒绝写入，并记录原因到 `./log/Completed-log.txt`。
+**写入规则：**
+- **正常下载**：MP4 + JPG 都下载完成且通过 `verifier` 校验后写入，标记 `demotion: false`
+- **降级下载**：只要 MP4 下载完成且通过校验即可写入，JPG 缺失/损坏时标记 `demotion: true`（降级记录）
+- 拒绝写入原因记录到 `./log/Completed-log.txt`
 
 ### 3. 文件完整性校验（verifier 包）
 
@@ -43,11 +46,13 @@ Hanime 视频下载工具，使用 Chrome DevTools Protocol 进行网页抓取�
 
 ```
 ./log/
-  ├── Download-log.txt    ← 下载失败日志（解析失败、下载失败、校验失败、重试耗尽）
+  ├── Download-log.txt    ← 下载失败日志（解析失败、下载失败、校验失败、重试耗尽、封面图失败）
   └── Completed-log.txt   ← 记录拒绝日志（MP4/JPG 缺失或校验失败导致拒绝写入完成记录）
 ```
 
 两个日志各有独立 mutex，互不干扰，格式统一为 `[时间] videoID=<ID> reason=<原因>`。
+
+**封面图失败记录：** 只要 JPG 封面图未成功下载/校验，就会写入 `Download-log.txt`，覆盖正常下载和降级下载两种场景。
 
 ### 5. 自动重试机制
 
@@ -82,7 +87,8 @@ Hanime 视频下载工具，使用 Chrome DevTools Protocol 进行网页抓取�
 **降级日志记录：**
 - 触发降级时记录：`videoID=XXX reason=触发降级下载: 尝试分辨率 720p`
 - 降级成功时记录：`videoID=XXX reason=降级下载成功: 分辨率 720p`
-- 降级下载的视频同样走 `verifier` 校验 + `registry` 记录
+- 降级下载的视频同样走 `verifier` 校验 + `registry` 记录（JPG 缺失时标记为 `demotion: true`）
+- 降级时封面图未下载/校验失败同样记录到 `Download-log.txt`
 
 **封面图保障：**
 - 降级时优先从下载页面 `img.download-image` 的 `src` 提取新鲜封面图 URL
@@ -346,6 +352,7 @@ go test ./... -v
 | V1 | 基础下载功能 |
 | V2 | Registry、Verifier、双日志、自动重试 |
 | V3 (PRO) | 降级下载、封面图防盗链修复、正常/降级流程分离 |
+| V3.1 (PRO) | 降级下载视频正常记录（Demotion 标记）、JPG 未下载写入 Download-log |
 
 ## 相关项目
 
