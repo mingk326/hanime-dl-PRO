@@ -147,6 +147,11 @@ func (d *Downloader) downloadFile(urlStr, filePath string, cb ProgressCallback) 
 		log.Printf("Resuming download for %s from byte %d", filePath, startOffset)
 	}
 
+	// 设置 HTTP 头：hanime1.me / vdownload.hembed.com 的图片资源有防盗链，
+	// 缺少 Referer 时返回 403。视频文件通常不检查 Referer，但加上也无害。
+	req.Header.Set("Referer", "https://hanime1.me/")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+
 	// 配置代理
 	tr := &http.Transport{
 		Proxy: http.ProxyFromEnvironment,

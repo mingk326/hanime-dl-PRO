@@ -243,32 +243,39 @@ func main() {
 						}
 					}
 
-					// === 检查本次尝试是否成功（MP4 和 JPG 都必须存在）===
+					// === 检查本次尝试是否成功（仅看 MP4，封面图单独处理）===
 				if currentMeta.DataURL != "" && currentMeta.VideoFilePath != "" {
 					if _, err := os.Stat(currentMeta.VideoFilePath); err == nil {
-						// MP4 存在，再检查 JPG
-						if currentMeta.ImageFilePath != "" {
-							if _, imgErr := os.Stat(currentMeta.ImageFilePath); imgErr == nil {
-								videoSuccess = true
-							} else {
-								log.Printf("[Worker %d] MP4 OK but JPG missing for %s, will retry",
-									workerId, currentMeta.VideoID)
-							}
-						} else {
-							// ImageFilePath 为空（视频无封面），仅检查 MP4
-							videoSuccess = true
-						}
-					}
-				}
-
-					if videoSuccess {
+						videoSuccess = true
 						log.Printf("[Worker %d] Video downloaded and verified OK: %s (attempt %d)",
 							workerId, currentMeta.VideoID, attempt+1)
 						break
 					}
+				}
+				}
 
-					log.Printf("[Worker %d] Attempt %d/%d failed for %s",
-						workerId, attempt+1, maxRetries+1, currentMeta.VideoID)
+				// === 视频下载成功后，确保封面图也下载完成（不触发降级）===
+				if videoSuccess && currentMeta.ImageURL != "" && currentMeta.ImageFilePath != "" {
+					if _, err := os.Stat(currentMeta.ImageFilePath); err != nil {
+						log.Printf("[Worker %d] Video OK but cover missing, retrying cover download for %s",
+							workerId, currentMeta.VideoID)
+						// 重新解析获取最新的封面图 URL（旧 URL 可能已过期）
+						if newMeta, rerr := s.ResolveVideoInfo(wsURL, currentMeta.VideoID, currentMeta.ListID); rerr == nil && newMeta.ImageURL != "" {
+							currentMeta.ImageURL = newMeta.ImageURL
+						}
+						if imgErr := d.DownloadWithRetry(currentMeta.ImageURL, currentMeta.ImageFilePath); imgErr != nil {
+							log.Printf("[Worker %d] Cover image download failed for %s: %v", workerId, currentMeta.VideoID, imgErr)
+							failurelog.Log(currentMeta.VideoID, fmt.Sprintf("封面图下载失败: %v", imgErr))
+						} else {
+							// 校验 jpg 图片完整性
+							if vErr := verifier.Verify(currentMeta.ImageFilePath); vErr != nil {
+								log.Printf("[Worker %d] Cover image verify failed for %s: %v", workerId, currentMeta.VideoID, vErr)
+								if verifier.IsCorrupt(vErr) {
+									os.Remove(currentMeta.ImageFilePath)
+								}
+							}
+						}
+					}
 				}
 
 				// 所有重试结束后仍未成功，尝试降级下载
