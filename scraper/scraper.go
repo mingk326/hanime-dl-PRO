@@ -603,6 +603,34 @@ func (s *Scraper) FallbackResolveDownloadURLs(wsURL, videoID string) ([]Resoluti
 		return nil, "", fmt.Errorf("fallback: navigate to watch page failed: %w", err)
 	}
 
+	// 1.5 在 watch 页面提取封面图 URL（必须在点击下载跳转之前！）
+	//     优先级：og:image meta 标签 > video poster 属性 > 视频容器内 img
+	//     og:image 是最可靠的，watch 页面始终包含此 meta 标签
+	var imageURL string
+	_ = chromedp.Run(ctx,
+		chromedp.Evaluate(`(function() {
+			// 方式1: og:image meta 标签（最可靠）
+			var og = document.querySelector('meta[property="og:image"]');
+			if (og && og.content) { return og.content; }
+			// 方式2: video poster 属性
+			var video = document.querySelector('video');
+			if (video && video.poster) { return video.poster; }
+			// 方式3: 视频容器内的 img
+			var img = document.querySelector('.video-player-wrapper img, #video-player img, .video-show-action img');
+			if (img && img.src) { return img.src; }
+			// 方式4: 任何 data-src 的懒加载图片
+			var lazyImg = document.querySelector('.video-player-wrapper img[data-src], #video-area img[data-src]');
+			if (lazyImg && lazyImg.getAttribute('data-src')) { return lazyImg.getAttribute('data-src'); }
+			return "";
+		})()`, &imageURL),
+	)
+
+	if imageURL != "" {
+		log.Printf("Fallback: extracted cover image from watch page for %s: %s", videoID, imageURL)
+	} else {
+		log.Printf("Fallback: no cover image found on watch page for %s", videoID)
+	}
+
 	// 2. 尝试点击下载按钮
 	//    优先点击可见的 #video-download-btn
 	//    若不可见（hidden-xs），则点击 more_horiz 展开下拉菜单再点击下载项
@@ -673,79 +701,53 @@ func (s *Scraper) FallbackResolveDownloadURLs(wsURL, videoID string) ([]Resoluti
 		}
 	}
 
-	// 4. 一次性提取下载链接 + 封面图 URL（原子操作，避免页面状态变化）
-	type fallbackData struct {
-		Links    []map[string]string `json:"links"`
-		ImageURL string              `json:"imageURL"`
-	}
-	var data fallbackData
+	// 4. 提取所有下载链接（独立执行，不受图片提取影响）
+	var rawLinks []map[string]string
 	err = chromedp.Run(ctx,
 		chromedp.WaitVisible(`table.download-table`, chromedp.ByQuery),
 		chromedp.Sleep(1*time.Second),
 		chromedp.Evaluate(`
-			(function() {
-				var links = Array.from(document.querySelectorAll('table.download-table tr')).slice(1).map(tr => {
-					let resTd = tr.querySelector('td:nth-child(2)');
-					let linkA = tr.querySelector('td:nth-child(5) a');
-					if (resTd && linkA) {
-						return {
-							resolution: resTd.innerText.trim(),
-							url: linkA.getAttribute('data-url')
-						};
-					}
-					return null;
-				}).filter(x => x !== null);
-
-				var img = document.querySelector('img.download-image');
-				var imageURL = "";
-				if (img) {
-					imageURL = img.getAttribute('src') || img.src || "";
+			Array.from(document.querySelectorAll('table.download-table tr')).slice(1).map(tr => {
+				let resTd = tr.querySelector('td:nth-child(2)');
+				let linkA = tr.querySelector('td:nth-child(5) a');
+				if (resTd && linkA) {
+					return {
+						resolution: resTd.innerText.trim(),
+						url: linkA.getAttribute('data-url')
+					};
 				}
-
-				return { links: links, imageURL: imageURL };
-			})()
-		`, &data),
+				return null;
+			}).filter(x => x !== null)
+		`, &rawLinks),
 	)
 	if err != nil {
-		return nil, "", fmt.Errorf("fallback: extract download data failed: %w", err)
+		return nil, "", fmt.Errorf("fallback: extract download links failed: %w", err)
 	}
 
-	if len(data.Links) == 0 {
+	if len(rawLinks) == 0 {
 		return nil, "", fmt.Errorf("fallback: no download links found")
 	}
 
-	imageURL := data.ImageURL
-
-	// 如果下载页面没有封面图，尝试从搜索页面获取
+	// 4.5 如果 watch 页面没拿到封面图，尝试从下载页面获取（非致命）
 	if imageURL == "" {
-		log.Printf("Fallback: no cover image on download page, trying search for %s", videoID)
-		searchURL := fmt.Sprintf("https://hanime1.me/search?query=%s&type=&genre=&sort=&date=&duration=",
-			url.QueryEscape(videoID))
+		log.Printf("Fallback: no image from watch page, trying download page for %s", videoID)
 		_ = chromedp.Run(ctx,
-			chromedp.Navigate(searchURL),
-			chromedp.Sleep(2*time.Second),
-			chromedp.Evaluate(fmt.Sprintf(`
-				(function() {
-					var link = document.querySelector("a[href*='watch?v=%s']");
-					if (link) {
-						var img = link.querySelector("img");
-						if (img) { return img.getAttribute('src') || img.src || ""; }
-					}
-					return "";
-				})()
-			`, videoID), &imageURL),
+			chromedp.Evaluate(`(function() {
+				var img = document.querySelector('img.download-image');
+				if (img && img.src) { return img.src; }
+				return "";
+			})()`, &imageURL),
 		)
-	}
-
-	if imageURL != "" {
-		log.Printf("Fallback: extracted cover image URL for %s: %s", videoID, imageURL)
-	} else {
-		log.Printf("Fallback: no cover image URL found for %s", videoID)
+		if imageURL != "" {
+			log.Printf("Fallback: extracted cover image from download page for %s", videoID)
+		} else {
+			log.Printf("Fallback: no cover image URL found anywhere for %s", videoID)
+		}
 	}
 
 	// 5. 按分辨率优先级排序（从配置分辨率开始，逐级降级到 240p）
-	links := make([]ResolutionLink, 0, len(data.Links))
-	for _, l := range data.Links {
+	links := make([]ResolutionLink, 0, len(rawLinks))
+	for _, l := range rawLinks {
 		if l["url"] != "" {
 			links = append(links, ResolutionLink{
 				Resolution: strings.TrimSpace(l["resolution"]),
