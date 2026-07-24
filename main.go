@@ -271,13 +271,88 @@ func main() {
 						workerId, attempt+1, maxRetries+1, currentMeta.VideoID)
 				}
 
-				// 所有重试结束后仍未成功，记录到 log.txt
+				// 所有重试结束后仍未成功，尝试降级下载
+			if !videoSuccess {
+				log.Printf("[Worker %d] All retries exhausted, attempting fallback download for %s", workerId, currentMeta.VideoID)
+
+				fallbackLinks, ferr := s.FallbackResolveDownloadURLs(wsURL, currentMeta.VideoID)
+				if ferr != nil {
+					log.Printf("[Worker %d] Fallback resolve failed for %s: %v", workerId, currentMeta.VideoID, ferr)
+					if logErr := failurelog.Log(currentMeta.VideoID,
+						fmt.Sprintf("降级下载失败: %v", ferr)); logErr != nil {
+						log.Printf("[Worker %d] Failed to write failure log: %v", workerId, logErr)
+					}
+				} else {
+					// 按优先级逐个尝试每个分辨率的下载链接
+					for _, link := range fallbackLinks {
+						// 记录降级日志：视频ID + 触发降级 + 降级到哪个分辨率
+						if logErr := failurelog.Log(currentMeta.VideoID,
+							fmt.Sprintf("触发降级下载: 尝试分辨率 %s", link.Resolution)); logErr != nil {
+							log.Printf("[Worker %d] Failed to write fallback log: %v", workerId, logErr)
+						}
+
+						log.Printf("[Worker %d] Fallback: trying %s for %s", workerId, link.Resolution, currentMeta.VideoID)
+
+						// 删除可能存在的残留文件
+						os.Remove(currentMeta.VideoFilePath)
+
+						// 下载视频
+						if dlErr := d.DownloadWithRetry(link.URL, currentMeta.VideoFilePath); dlErr != nil {
+							log.Printf("[Worker %d] Fallback download failed at %s for %s: %v",
+								workerId, link.Resolution, currentMeta.VideoID, dlErr)
+							os.Remove(currentMeta.VideoFilePath)
+							continue
+						}
+
+						// 校验 MP4
+						if vErr := verifier.Verify(currentMeta.VideoFilePath); vErr != nil {
+							log.Printf("[Worker %d] Fallback verify failed at %s for %s: %v",
+								workerId, link.Resolution, currentMeta.VideoID, vErr)
+							if verifier.IsCorrupt(vErr) {
+								os.Remove(currentMeta.VideoFilePath)
+							}
+							continue
+						}
+
+						// 下载成功，记录降级成功日志
+						log.Printf("[Worker %d] Fallback download succeeded at %s for %s",
+							workerId, link.Resolution, currentMeta.VideoID)
+						failurelog.Log(currentMeta.VideoID,
+							fmt.Sprintf("降级下载成功: 分辨率 %s", link.Resolution))
+
+						// 更新 metadata 中的下载 URL
+						currentMeta.DataURL = link.URL
+
+						// 下载封面图（如果还没有）
+						if currentMeta.ImageURL != "" && currentMeta.ImageFilePath != "" {
+							if _, err := os.Stat(currentMeta.ImageFilePath); os.IsNotExist(err) {
+								if imgErr := d.DownloadWithRetry(currentMeta.ImageURL, currentMeta.ImageFilePath); imgErr != nil {
+									log.Printf("[Worker %d] Fallback image download failed for %s: %v", workerId, currentMeta.VideoID, imgErr)
+								}
+							}
+							if _, err := os.Stat(currentMeta.ImageFilePath); err == nil {
+								if vErr := verifier.Verify(currentMeta.ImageFilePath); vErr != nil {
+									log.Printf("[Worker %d] Fallback image verify failed: %v", workerId, vErr)
+									if verifier.IsCorrupt(vErr) {
+										os.Remove(currentMeta.ImageFilePath)
+									}
+								}
+							}
+						}
+
+						videoSuccess = true
+						break
+					}
+				}
+
+				// 如果降级也失败
 				if !videoSuccess {
 					if logErr := failurelog.Log(currentMeta.VideoID,
-						fmt.Sprintf("重试 %d 次后仍下载失败", maxRetries)); logErr != nil {
+						fmt.Sprintf("重试 %d 次后仍下载失败（含降级下载）", maxRetries)); logErr != nil {
 						log.Printf("[Worker %d] Failed to write failure log: %v", workerId, logErr)
 					}
 				}
+			}
 
 				if videoSuccess && globalConfig.ClearCache {
 				cacheFile := filepath.Join(globalConfig.CacheDir, fmt.Sprintf("info_%s.json", currentMeta.VideoID))

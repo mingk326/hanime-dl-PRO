@@ -635,7 +635,90 @@ func (ws *WebServer) processSingleTask(workerID int, task *TaskStatus) {
 	}
 
 	if !videoSuccess {
-		return
+		// === 降级下载：通过 watch 页面点击下载按钮，按分辨率优先级逐个尝试 ===
+		log.Printf("[Worker %d] All retries exhausted, attempting fallback download for %s", workerID, task.VideoID)
+		ws.mutateTask(task, func(t *TaskStatus) {
+			t.Status = "downloading"
+			t.ErrorMessage = ""
+		})
+
+		fallbackLinks, ferr := ws.fallbackResolveDownloadURLs(task.VideoID)
+		if ferr != nil {
+			log.Printf("[Worker %d] Fallback resolve failed for %s: %v", workerID, task.VideoID, ferr)
+			failurelog.Log(task.VideoID, fmt.Sprintf("降级下载失败: %v", ferr))
+		} else {
+			for _, link := range fallbackLinks {
+				// 记录降级日志：视频ID + 触发降级 + 降级到哪个分辨率
+				failurelog.Log(task.VideoID, fmt.Sprintf("触发降级下载: 尝试分辨率 %s", link.Resolution))
+				log.Printf("[Worker %d] Fallback: trying %s for %s", workerID, link.Resolution, task.VideoID)
+
+				// 删除可能存在的残留文件
+				os.Remove(meta.VideoFilePath)
+
+				// 下载视频（带进度回调）
+				progressCB := func(downloaded, total int64) {
+					ws.mutateTask(task, func(t *TaskStatus) {
+						t.Downloaded = downloaded
+						if total > 0 {
+							t.TotalSize = total
+							t.Progress = int(float64(downloaded) / float64(total) * 100)
+						}
+					})
+				}
+
+				dlErr := ws.downloader.DownloadWithRetryCB(link.URL, meta.VideoFilePath, progressCB)
+				if dlErr != nil {
+					log.Printf("[Worker %d] Fallback download failed at %s for %s: %v",
+						workerID, link.Resolution, task.VideoID, dlErr)
+					os.Remove(meta.VideoFilePath)
+					continue
+				}
+
+				// 校验 MP4
+				if vErr := verifier.Verify(meta.VideoFilePath); vErr != nil {
+					log.Printf("[Worker %d] Fallback verify failed at %s for %s: %v",
+						workerID, link.Resolution, task.VideoID, vErr)
+					if verifier.IsCorrupt(vErr) {
+						os.Remove(meta.VideoFilePath)
+					}
+					continue
+				}
+
+				// 下载成功
+				log.Printf("[Worker %d] Fallback download succeeded at %s for %s",
+					workerID, link.Resolution, task.VideoID)
+				failurelog.Log(task.VideoID, fmt.Sprintf("降级下载成功: 分辨率 %s", link.Resolution))
+
+				meta.DataURL = link.URL
+
+				// 下载封面图（如果还没有）
+				if meta.ImageURL != "" && meta.ImageFilePath != "" {
+					if _, e := os.Stat(meta.ImageFilePath); os.IsNotExist(e) {
+						ws.downloader.DownloadWithRetry(meta.ImageURL, meta.ImageFilePath)
+					}
+					if _, e := os.Stat(meta.ImageFilePath); e == nil {
+						if vErr := verifier.Verify(meta.ImageFilePath); vErr != nil {
+							log.Printf("[Worker %d] Fallback image verify failed: %v", workerID, vErr)
+							if verifier.IsCorrupt(vErr) {
+								os.Remove(meta.ImageFilePath)
+							}
+						}
+					}
+				}
+
+				videoSuccess = true
+				break
+			}
+		}
+
+		if !videoSuccess {
+			failurelog.Log(task.VideoID, fmt.Sprintf("重试 %d 次后仍下载失败（含降级下载）", maxRetries))
+			ws.mutateTask(task, func(t *TaskStatus) {
+				t.Status = "failed"
+				t.ErrorMessage = "重试及降级下载均失败"
+			})
+			return
+		}
 	}
 
 	ws.finishTask(task)
@@ -730,6 +813,17 @@ func (ws *WebServer) refreshDataURL(videoID string) (string, error) {
 		}
 	}
 	return u, err
+}
+
+// fallbackResolveDownloadURLs 降级解析下载链接，连接失效时自动重连一次
+func (ws *WebServer) fallbackResolveDownloadURLs(videoID string) ([]scraper.ResolutionLink, error) {
+	links, err := ws.scraper.FallbackResolveDownloadURLs(ws.getWSURL(), videoID)
+	if err != nil {
+		if u, rerr := ws.refreshWSURL(); rerr == nil {
+			links, err = ws.scraper.FallbackResolveDownloadURLs(u, videoID)
+		}
+	}
+	return links, err
 }
 
 // --- 生命周期 ---

@@ -496,6 +496,231 @@ func (s *Scraper) RefreshVideoDataURL(wsURL, videoID string) (string, error) {
 	return selectedURL, nil
 }
 
+// ResolutionLink 分辨率下载链接
+type ResolutionLink struct {
+	Resolution string
+	URL        string
+}
+
+// resolutionPriority 定义分辨率优先级顺序（从高到低）
+var resolutionPriority = []string{"1080p", "720p", "480p", "360p", "240p"}
+
+// normalizeResolution 将分辨率文本标准化为小写无空格形式，并匹配到标准分辨率。
+// 例如 "1080P"、"1080 p"、"1920x1080" 都会归一化为 "1080p"。
+func normalizeResolution(res string) string {
+	res = strings.ToLower(strings.TrimSpace(res))
+	res = strings.ReplaceAll(res, " ", "")
+	for _, std := range resolutionPriority {
+		if strings.Contains(res, std) {
+			return std
+		}
+	}
+	return res
+}
+
+// sortLinksByPriority 将下载链接按分辨率优先级排序。
+// 从配置的分辨率开始，逐级降级到 240p。
+// 例如配置为 1080p 时排序为: 1080p → 720p → 480p → 360p → 240p
+// 配置为 720p 时排序为: 720p → 480p → 360p → 240p（不尝试 1080p）
+func sortLinksByPriority(links []ResolutionLink, preferredRes string) []ResolutionLink {
+	preferredNorm := normalizeResolution(preferredRes)
+
+	// 找到配置分辨率的起始索引
+	startIdx := 0
+	for i, r := range resolutionPriority {
+		if r == preferredNorm {
+			startIdx = i
+			break
+		}
+	}
+
+	// 建立标准化分辨率 → 链接的映射
+	linkMap := make(map[string]ResolutionLink)
+	for _, l := range links {
+		norm := normalizeResolution(l.Resolution)
+		if _, exists := linkMap[norm]; !exists {
+			linkMap[norm] = l
+		}
+	}
+
+	// 从配置分辨率开始，按降序排列
+	var sorted []ResolutionLink
+	for i := startIdx; i < len(resolutionPriority); i++ {
+		if l, ok := linkMap[resolutionPriority[i]]; ok {
+			sorted = append(sorted, l)
+		}
+	}
+
+	// 添加未在标准列表中的分辨率（排到最后）
+	for _, l := range links {
+		norm := normalizeResolution(l.Resolution)
+		found := false
+		for _, r := range resolutionPriority {
+			if r == norm {
+				found = true
+				break
+			}
+		}
+		if !found {
+			sorted = append(sorted, l)
+		}
+	}
+
+	return sorted
+}
+
+// FallbackResolveDownloadURLs 通过 watch 页面点击下载按钮获取下载链接（降级方案）。
+//
+// 流程：
+//  1. 导航到 watch 页面 (https://hanime1.me/watch?v=XXX)，建立会话
+//  2. 点击下载按钮（若按钮隐藏在 more_horiz 下拉菜单中则先展开菜单再点击）
+//  3. 等待跳转到下载页面，若未跳转则直接导航到下载页面
+//  4. 提取所有分辨率的下载链接
+//  5. 按优先级排序返回（配置分辨率 → 720p → 480p → 360p → 240p）
+//
+// 调用方（main.go / web_server.go）拿到链接后逐个尝试下载，直到成功或全部失败。
+func (s *Scraper) FallbackResolveDownloadURLs(wsURL, videoID string) ([]ResolutionLink, error) {
+	ctx1, cancel1 := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel1()
+
+	allocatorContext, cancelAllocator := chromedp.NewRemoteAllocator(ctx1, wsURL, chromedp.NoModifyURL)
+	defer cancelAllocator()
+
+	ctx, cancelCtx, err := newTabContext(allocatorContext, wsURL)
+	if err != nil {
+		return nil, err
+	}
+	defer cancelCtx()
+
+	// 1. 导航到 watch 页面（建立会话/cookie）
+	watchURL := fmt.Sprintf("https://hanime1.me/watch?v=%s", videoID)
+	err = chromedp.Run(ctx,
+		navigateAction(watchURL),
+		chromedp.Sleep(3*time.Second),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("fallback: navigate to watch page failed: %w", err)
+	}
+
+	// 2. 尝试点击下载按钮
+	//    优先点击可见的 #video-download-btn
+	//    若不可见（hidden-xs），则点击 more_horiz 展开下拉菜单再点击下载项
+	clickResult := ""
+	_ = chromedp.Run(ctx,
+		chromedp.Evaluate(`(function() {
+			// 尝试直接点击可见的下载按钮
+			var btn = document.querySelector('#video-download-btn');
+			if (btn) {
+				var parent = btn.closest('.video-show-action-btn');
+				if (parent) {
+					var style = window.getComputedStyle(parent);
+					if (style.display !== 'none' && style.visibility !== 'hidden' && parent.offsetWidth > 0) {
+						btn.click();
+						return 'direct';
+					}
+				}
+			}
+			// 下载按钮可能隐藏在 more_horiz 下拉菜单中
+			var dropdownToggle = document.querySelector('.video-show-action-btn.dropdown-toggle');
+			if (dropdownToggle) {
+				dropdownToggle.click();
+				return 'dropdown';
+			}
+			return 'none';
+		})()`, &clickResult),
+	)
+
+	log.Printf("Fallback: download button click result for %s: %s", videoID, clickResult)
+
+	if clickResult == "dropdown" {
+		// 等待下拉菜单展开，然后点击下载项
+		time.Sleep(1 * time.Second)
+		_ = chromedp.Run(ctx,
+			chromedp.Evaluate(`(function() {
+				var items = document.querySelectorAll('.more-horiz-item');
+				for (var i = 0; i < items.length; i++) {
+					var span = items[i].querySelector('span');
+					var icon = items[i].querySelector('.material-icons');
+					if (span && icon && icon.textContent.trim() === 'download') {
+						items[i].click();
+						return true;
+					}
+				}
+				return false;
+			})()`, nil),
+		)
+	}
+
+	// 3. 等待页面跳转，检查是否已到达下载页面
+	time.Sleep(3 * time.Second)
+
+	var hasTable bool
+	_ = chromedp.Run(ctx,
+		chromedp.Evaluate(`!!document.querySelector('table.download-table')`, &hasTable),
+	)
+
+	if !hasTable {
+		// 点击没有成功跳转，直接导航到下载页面
+		log.Printf("Fallback: click did not navigate, falling back to direct download page for %s", videoID)
+		downloadURL := fmt.Sprintf(chromeDownURL, videoID)
+		err = chromedp.Run(ctx,
+			navigateAction(downloadURL),
+			chromedp.Sleep(2*time.Second),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("fallback: navigate to download page failed: %w", err)
+		}
+	}
+
+	// 4. 提取所有下载链接
+	var rawLinks []map[string]string
+	err = chromedp.Run(ctx,
+		chromedp.WaitVisible(`table.download-table`, chromedp.ByQuery),
+		chromedp.Sleep(1*time.Second),
+		chromedp.Evaluate(`
+			Array.from(document.querySelectorAll('table.download-table tr')).slice(1).map(tr => {
+				let resTd = tr.querySelector('td:nth-child(2)');
+				let linkA = tr.querySelector('td:nth-child(5) a');
+				if (resTd && linkA) {
+					return {
+						resolution: resTd.innerText.trim(),
+						url: linkA.getAttribute('data-url')
+					};
+				}
+				return null;
+			}).filter(x => x !== null)
+		`, &rawLinks),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("fallback: extract download links failed: %w", err)
+	}
+
+	if len(rawLinks) == 0 {
+		return nil, fmt.Errorf("fallback: no download links found")
+	}
+
+	// 5. 按分辨率优先级排序（从配置分辨率开始，逐级降级到 240p）
+	links := make([]ResolutionLink, 0, len(rawLinks))
+	for _, l := range rawLinks {
+		if l["url"] != "" {
+			links = append(links, ResolutionLink{
+				Resolution: strings.TrimSpace(l["resolution"]),
+				URL:        l["url"],
+			})
+		}
+	}
+
+	sortedLinks := sortLinksByPriority(links, s.resolution)
+
+	log.Printf("Fallback: resolved %d download links for %s (priority: %s → 240p)",
+		len(sortedLinks), videoID, s.resolution)
+	for i, l := range sortedLinks {
+		log.Printf("Fallback: [%d] %s for %s", i+1, l.Resolution, videoID)
+	}
+
+	return sortedLinks, nil
+}
+
 // truncateFilename 截断文件名
 func truncateFilename(s string, maxBytes int) string {
 	if len(s) <= maxBytes {

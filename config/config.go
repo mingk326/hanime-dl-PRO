@@ -74,6 +74,12 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 
+	// 设置默认值：MaxRetryAttempts 未设置（0）时默认为 3
+	// 解决旧配置文件缺少此字段导致不重试的问题
+	if cfg.MaxRetryAttempts <= 0 {
+		cfg.MaxRetryAttempts = 3
+	}
+
 	return &cfg, nil
 }
 
