@@ -275,7 +275,7 @@ func main() {
 			if !videoSuccess {
 				log.Printf("[Worker %d] All retries exhausted, attempting fallback download for %s", workerId, currentMeta.VideoID)
 
-				fallbackLinks, ferr := s.FallbackResolveDownloadURLs(wsURL, currentMeta.VideoID)
+				fallbackLinks, fallbackImageURL, ferr := s.FallbackResolveDownloadURLs(wsURL, currentMeta.VideoID)
 				if ferr != nil {
 					log.Printf("[Worker %d] Fallback resolve failed for %s: %v", workerId, currentMeta.VideoID, ferr)
 					if logErr := failurelog.Log(currentMeta.VideoID,
@@ -283,6 +283,10 @@ func main() {
 						log.Printf("[Worker %d] Failed to write failure log: %v", workerId, logErr)
 					}
 				} else {
+					// 用降级页面获取的封面图 URL 刷新 metadata（旧 URL 可能已过期）
+					if fallbackImageURL != "" {
+						currentMeta.ImageURL = fallbackImageURL
+					}
 					// 按优先级逐个尝试每个分辨率的下载链接
 					for _, link := range fallbackLinks {
 						// 记录降级日志：视频ID + 触发降级 + 降级到哪个分辨率

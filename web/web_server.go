@@ -642,11 +642,15 @@ func (ws *WebServer) processSingleTask(workerID int, task *TaskStatus) {
 			t.ErrorMessage = ""
 		})
 
-		fallbackLinks, ferr := ws.fallbackResolveDownloadURLs(task.VideoID)
+		fallbackLinks, fallbackImageURL, ferr := ws.fallbackResolveDownloadURLs(task.VideoID)
 		if ferr != nil {
 			log.Printf("[Worker %d] Fallback resolve failed for %s: %v", workerID, task.VideoID, ferr)
 			failurelog.Log(task.VideoID, fmt.Sprintf("降级下载失败: %v", ferr))
 		} else {
+			// 用降级页面获取的封面图 URL 刷新 metadata（旧 URL 可能已过期）
+			if fallbackImageURL != "" {
+				meta.ImageURL = fallbackImageURL
+			}
 			for _, link := range fallbackLinks {
 				// 记录降级日志：视频ID + 触发降级 + 降级到哪个分辨率
 				failurelog.Log(task.VideoID, fmt.Sprintf("触发降级下载: 尝试分辨率 %s", link.Resolution))
@@ -816,14 +820,14 @@ func (ws *WebServer) refreshDataURL(videoID string) (string, error) {
 }
 
 // fallbackResolveDownloadURLs 降级解析下载链接，连接失效时自动重连一次
-func (ws *WebServer) fallbackResolveDownloadURLs(videoID string) ([]scraper.ResolutionLink, error) {
-	links, err := ws.scraper.FallbackResolveDownloadURLs(ws.getWSURL(), videoID)
+func (ws *WebServer) fallbackResolveDownloadURLs(videoID string) ([]scraper.ResolutionLink, string, error) {
+	links, imageURL, err := ws.scraper.FallbackResolveDownloadURLs(ws.getWSURL(), videoID)
 	if err != nil {
 		if u, rerr := ws.refreshWSURL(); rerr == nil {
-			links, err = ws.scraper.FallbackResolveDownloadURLs(u, videoID)
+			links, imageURL, err = ws.scraper.FallbackResolveDownloadURLs(u, videoID)
 		}
 	}
-	return links, err
+	return links, imageURL, err
 }
 
 // --- 生命周期 ---

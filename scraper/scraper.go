@@ -579,7 +579,8 @@ func sortLinksByPriority(links []ResolutionLink, preferredRes string) []Resoluti
 //  5. 按优先级排序返回（配置分辨率 → 720p → 480p → 360p → 240p）
 //
 // 调用方（main.go / web_server.go）拿到链接后逐个尝试下载，直到成功或全部失败。
-func (s *Scraper) FallbackResolveDownloadURLs(wsURL, videoID string) ([]ResolutionLink, error) {
+// 同时返回从下载页面提取的封面图 URL（可能为空），调用方可用于刷新过期的 ImageURL。
+func (s *Scraper) FallbackResolveDownloadURLs(wsURL, videoID string) ([]ResolutionLink, string, error) {
 	ctx1, cancel1 := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel1()
 
@@ -588,7 +589,7 @@ func (s *Scraper) FallbackResolveDownloadURLs(wsURL, videoID string) ([]Resoluti
 
 	ctx, cancelCtx, err := newTabContext(allocatorContext, wsURL)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	defer cancelCtx()
 
@@ -599,7 +600,7 @@ func (s *Scraper) FallbackResolveDownloadURLs(wsURL, videoID string) ([]Resoluti
 		chromedp.Sleep(3*time.Second),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("fallback: navigate to watch page failed: %w", err)
+		return nil, "", fmt.Errorf("fallback: navigate to watch page failed: %w", err)
 	}
 
 	// 2. 尝试点击下载按钮
@@ -668,12 +669,13 @@ func (s *Scraper) FallbackResolveDownloadURLs(wsURL, videoID string) ([]Resoluti
 			chromedp.Sleep(2*time.Second),
 		)
 		if err != nil {
-			return nil, fmt.Errorf("fallback: navigate to download page failed: %w", err)
+			return nil, "", fmt.Errorf("fallback: navigate to download page failed: %w", err)
 		}
 	}
 
-	// 4. 提取所有下载链接
+	// 4. 提取所有下载链接和封面图 URL
 	var rawLinks []map[string]string
+	var imageURL string
 	err = chromedp.Run(ctx,
 		chromedp.WaitVisible(`table.download-table`, chromedp.ByQuery),
 		chromedp.Sleep(1*time.Second),
@@ -690,13 +692,15 @@ func (s *Scraper) FallbackResolveDownloadURLs(wsURL, videoID string) ([]Resoluti
 				return null;
 			}).filter(x => x !== null)
 		`, &rawLinks),
+		// 同时提取下载页面上的封面图 URL（img.download-image 的 src 属性）
+		chromedp.AttributeValue(downloadImageSelector, "src", &imageURL, nil, chromedp.ByQuery),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("fallback: extract download links failed: %w", err)
+		return nil, "", fmt.Errorf("fallback: extract download links failed: %w", err)
 	}
 
 	if len(rawLinks) == 0 {
-		return nil, fmt.Errorf("fallback: no download links found")
+		return nil, "", fmt.Errorf("fallback: no download links found")
 	}
 
 	// 5. 按分辨率优先级排序（从配置分辨率开始，逐级降级到 240p）
@@ -718,7 +722,11 @@ func (s *Scraper) FallbackResolveDownloadURLs(wsURL, videoID string) ([]Resoluti
 		log.Printf("Fallback: [%d] %s for %s", i+1, l.Resolution, videoID)
 	}
 
-	return sortedLinks, nil
+	if imageURL != "" {
+		log.Printf("Fallback: extracted cover image URL for %s", videoID)
+	}
+
+	return sortedLinks, imageURL, nil
 }
 
 // truncateFilename 截断文件名
