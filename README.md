@@ -4,6 +4,12 @@
 
 Hanime 视频下载工具，使用 Chrome DevTools Protocol 进行网页抓取，支持 CLI 和 Web 两种模式。
 
+## 相关项目（配套使用）
+
+本项目需要配合配置文件生成工具一起使用：
+
+- [hanime-config-generator](https://github.com/mingk326/hanime-config-generator) - 在线配置文件生成工具，可视化生成 `config.yaml`，与 `hanime-dl-PRO` 配套使用
+
 ## 版本特性
 
 相对原项目，做了以下改进：
@@ -354,9 +360,9 @@ go test ./... -v
 | V3 (PRO) | 降级下载、封面图防盗链修复、正常/降级流程分离 |
 | V3.1 (PRO) | 降级下载视频正常记录（Demotion 标记）、JPG 未下载写入 Download-log |
 
-## 相关项目
+## 相关链接
 
-- [hanime-config-generator](https://github.com/mingk326/hanime-config-generator) - 在线配置文件生成工具，可视化生成 `config.yaml`
+- [hanime-config-generator](https://github.com/mingk326/hanime-config-generator) - 配套使用的配置生成工具
 
 ## 许可证
 
