@@ -283,10 +283,6 @@ func main() {
 						log.Printf("[Worker %d] Failed to write failure log: %v", workerId, logErr)
 					}
 				} else {
-					// 用降级页面获取的封面图 URL 刷新 metadata（旧 URL 可能已过期）
-					if fallbackImageURL != "" {
-						currentMeta.ImageURL = fallbackImageURL
-					}
 					// 按优先级逐个尝试每个分辨率的下载链接
 					for _, link := range fallbackLinks {
 						// 记录降级日志：视频ID + 触发降级 + 降级到哪个分辨率
@@ -327,14 +323,13 @@ func main() {
 						// 更新 metadata 中的下载 URL
 						currentMeta.DataURL = link.URL
 
-						// 下载封面图（如果还没有）
-					if currentMeta.ImageURL != "" && currentMeta.ImageFilePath != "" {
+						// 下载封面图（用 Go HTTP 客户端下载，不受 CORS 限制）
+					if fallbackImageURL != "" && currentMeta.ImageFilePath != "" {
 						if _, err := os.Stat(currentMeta.ImageFilePath); os.IsNotExist(err) {
 							log.Printf("[Worker %d] Fallback: downloading cover image for %s from %s",
-								workerId, currentMeta.VideoID, currentMeta.ImageURL)
-							if imgErr := d.DownloadWithRetry(currentMeta.ImageURL, currentMeta.ImageFilePath); imgErr != nil {
+								workerId, currentMeta.VideoID, fallbackImageURL)
+							if imgErr := d.DownloadWithRetry(fallbackImageURL, currentMeta.ImageFilePath); imgErr != nil {
 								log.Printf("[Worker %d] Fallback image download failed for %s: %v", workerId, currentMeta.VideoID, imgErr)
-								// 记录到失败日志
 								failurelog.Log(currentMeta.VideoID,
 									fmt.Sprintf("降级下载: 封面图下载失败 %v", imgErr))
 							}
@@ -348,8 +343,7 @@ func main() {
 							}
 						}
 					} else {
-						log.Printf("[Worker %d] Fallback: no ImageURL or ImageFilePath for %s (ImageURL=%s, ImageFilePath=%s)",
-							workerId, currentMeta.VideoID, currentMeta.ImageURL, currentMeta.ImageFilePath)
+						log.Printf("[Worker %d] Fallback: no cover image URL for %s", workerId, currentMeta.VideoID)
 					}
 
 						videoSuccess = true

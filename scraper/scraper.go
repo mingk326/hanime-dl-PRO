@@ -2,6 +2,7 @@ package scraper
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,6 +21,26 @@ import (
 
 	"hanime-dl/chrome"
 )
+
+// WriteBase64Image 将 base64 编码的图片数据写入文件。
+// 用于降级下载时将在浏览器内 fetch 获取的封面图数据写入磁盘。
+func WriteBase64Image(base64Data, filePath string) error {
+	data, err := base64.StdEncoding.DecodeString(base64Data)
+	if err != nil {
+		return fmt.Errorf("decode base64 image: %w", err)
+	}
+	if len(data) == 0 {
+		return fmt.Errorf("decoded image data is empty")
+	}
+	if dir := filepath.Dir(filePath); dir != "" {
+		os.MkdirAll(dir, 0755)
+	}
+	if err := os.WriteFile(filePath, data, 0644); err != nil {
+		return fmt.Errorf("write image file %s: %w", filePath, err)
+	}
+	log.Printf("Wrote base64 image to %s (%d bytes)", filePath, len(data))
+	return nil
+}
 
 // newTabContext 在已有浏览器中打开一个新「标签页」（而非新窗口）并返回附着其上的 chromedp context。
 // 说明：chromedp v0.13.x 在远程 allocator 下会强制以 newWindow=true 创建新窗口，
@@ -579,7 +600,9 @@ func sortLinksByPriority(links []ResolutionLink, preferredRes string) []Resoluti
 //  5. 按优先级排序返回（配置分辨率 → 720p → 480p → 360p → 240p）
 //
 // 调用方（main.go / web_server.go）拿到链接后逐个尝试下载，直到成功或全部失败。
-// 同时返回从下载页面提取的封面图 URL（可能为空），调用方可用于刷新过期的 ImageURL。
+// 同时返回从下载页面提取的封面图 base64 数据（可能为空），调用方直接写入文件。
+// 注意：不返回 URL 而是 base64 数据，因为封面图 URL 带有 secure 时间戳参数会过期，
+// 返回 URL 给 Go HTTP 客户端下载时可能已失效。在浏览器内 fetch 下载可使用页面会话。
 func (s *Scraper) FallbackResolveDownloadURLs(wsURL, videoID string) ([]ResolutionLink, string, error) {
 	ctx1, cancel1 := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel1()
@@ -604,9 +627,9 @@ func (s *Scraper) FallbackResolveDownloadURLs(wsURL, videoID string) ([]Resoluti
 	}
 
 	// 1.5 在 watch 页面提取封面图 URL（必须在点击下载跳转之前！）
-	//     优先级：og:image meta 标签 > video poster 属性 > 视频容器内 img
+	//     优先级：og:image meta 标签 > video poster 属性
 	//     og:image 是最可靠的，watch 页面始终包含此 meta 标签
-	var imageURL string
+	var coverURL string
 	_ = chromedp.Run(ctx,
 		chromedp.Evaluate(`(function() {
 			// 方式1: og:image meta 标签（最可靠）
@@ -615,18 +638,12 @@ func (s *Scraper) FallbackResolveDownloadURLs(wsURL, videoID string) ([]Resoluti
 			// 方式2: video poster 属性
 			var video = document.querySelector('video');
 			if (video && video.poster) { return video.poster; }
-			// 方式3: 视频容器内的 img
-			var img = document.querySelector('.video-player-wrapper img, #video-player img, .video-show-action img');
-			if (img && img.src) { return img.src; }
-			// 方式4: 任何 data-src 的懒加载图片
-			var lazyImg = document.querySelector('.video-player-wrapper img[data-src], #video-area img[data-src]');
-			if (lazyImg && lazyImg.getAttribute('data-src')) { return lazyImg.getAttribute('data-src'); }
 			return "";
-		})()`, &imageURL),
+		})()`, &coverURL),
 	)
 
-	if imageURL != "" {
-		log.Printf("Fallback: extracted cover image from watch page for %s: %s", videoID, imageURL)
+	if coverURL != "" {
+		log.Printf("Fallback: found cover image URL on watch page for %s: %s", videoID, coverURL)
 	} else {
 		log.Printf("Fallback: no cover image found on watch page for %s", videoID)
 	}
@@ -728,22 +745,31 @@ func (s *Scraper) FallbackResolveDownloadURLs(wsURL, videoID string) ([]Resoluti
 		return nil, "", fmt.Errorf("fallback: no download links found")
 	}
 
-	// 4.5 如果 watch 页面没拿到封面图，尝试从下载页面获取（非致命）
-	if imageURL == "" {
-		log.Printf("Fallback: no image from watch page, trying download page for %s", videoID)
-		_ = chromedp.Run(ctx,
-			chromedp.Evaluate(`(function() {
-				var img = document.querySelector('img.download-image');
-				if (img && img.src) { return img.src; }
-				return "";
-			})()`, &imageURL),
-		)
-		if imageURL != "" {
-			log.Printf("Fallback: extracted cover image from download page for %s", videoID)
-		} else {
-			log.Printf("Fallback: no cover image URL found anywhere for %s", videoID)
-		}
+	// 4.5 从下载页面提取封面图 URL（img.download-image 的 src，优先使用）
+	//     下载页面的 img.download-image 是最可靠的封面图来源，用户已确认。
+	//     优先使用下载页面的 src，watch 页面的 og:image 仅作为备选。
+	var downloadPageImgURL string
+	_ = chromedp.Run(ctx,
+		chromedp.Evaluate(`(function() {
+			var img = document.querySelector('img.download-image');
+			if (img && img.src) { return img.src; }
+			return "";
+		})()`, &downloadPageImgURL),
+	)
+	if downloadPageImgURL != "" {
+		coverURL = downloadPageImgURL
+		log.Printf("Fallback: using cover image from download page (img.download-image) for %s: %s", videoID, coverURL)
+	} else if coverURL != "" {
+		log.Printf("Fallback: using cover image from watch page (og:image) for %s: %s", videoID, coverURL)
+	} else {
+		log.Printf("Fallback: no cover image URL found for %s", videoID)
 	}
+
+	// 4.6 封面图 URL 直接返回给调用方，由 Go HTTP 客户端下载。
+	//     之前尝试在浏览器内 fetch 转为 base64，但 vdownload.hembed.com 跨域资源
+	//     被浏览器 CORS 策略阻止，导致 fetch 失败、imageBase64 为空。
+	//     Go HTTP 客户端不受 CORS 限制，可直接下载图片 URL。
+	//     secure 时间戳参数过期时间通常为数小时，提取后立即下载不会过期。
 
 	// 5. 按分辨率优先级排序（从配置分辨率开始，逐级降级到 240p）
 	links := make([]ResolutionLink, 0, len(rawLinks))
@@ -764,7 +790,7 @@ func (s *Scraper) FallbackResolveDownloadURLs(wsURL, videoID string) ([]Resoluti
 		log.Printf("Fallback: [%d] %s for %s", i+1, l.Resolution, videoID)
 	}
 
-	return sortedLinks, imageURL, nil
+	return sortedLinks, coverURL, nil
 }
 
 // truncateFilename 截断文件名
