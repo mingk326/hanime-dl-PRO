@@ -1,18 +1,18 @@
-# Hanime Downloader V2
+# Hanime Downloader PRO
 
-> 基于 [mingjiezxc/hanime-dl](https://github.com/mingjiezxc/hanime-dl) 的增强版本，新增完成记录、文件校验、失败日志、自动重试等可靠性功能。
+> 基于 [mingjiezxc/hanime-dl](https://github.com/mingjiezxc/hanime-dl) 的增强版本，新增完成记录、文件校验、失败日志、自动重试、降级下载等可靠性功能。
 
 Hanime 视频下载工具，使用 Chrome DevTools Protocol 进行网页抓取，支持 CLI 和 Web 两种模式。
 
-## V2 新增特性
+## 版本特性
 
-相对原项目，V2 做了以下改进：
+相对原项目，做了以下改进：
 
 ### 1. 修复 403/404 卡死问题
 
-原项目遇到 403/404 时会卡住等待 50 分钟超时。V2 通过 HTTP 状态码监听实现 20 秒内快速失败。
+原项目遇到 403/404 时会卡住等待 50 分钟超时。通过 HTTP 状态码监听实现 20 秒内快速失败。
 
-| 对比项 | 原项目 | V2 |
+| 对比项 | 原项目 | PRO |
 |--------|--------|-----|
 | 403/404 超时时间 | 50 分钟 | 20 秒 |
 | 403/404 重试 | 5 次无效重试 | 立即失败，不重试 |
@@ -85,11 +85,26 @@ Hanime 视频下载工具，使用 Chrome DevTools Protocol 进行网页抓取�
 - 降级下载的视频同样走 `verifier` 校验 + `registry` 记录
 
 **封面图保障：**
-- 降级时同步从下载页面提取新鲜封面图 URL（旧 URL 可能已过期）
-- 下载页面无封面图时回退到搜索页面获取视频缩略图
-- 封面图下载失败时记录到 `Download-log.txt`
+- 降级时优先从下载页面 `img.download-image` 的 `src` 提取新鲜封面图 URL
+- watch 页面的 `og:image` meta 标签作为备选
+- 用 Go HTTP 客户端直接下载封面图 URL（添加 `Referer` 头绕过防盗链）
+- 降级下载的封面图同样经过 `verifier` 校验
 
-### 8. 六层中断恢复机制
+### 8. 正常下载与降级下载分离
+
+**正常流程**：视频和封面图通过下载页面的 URL 直接下载，只有视频本身下载失败才触发降级。
+
+| 场景 | 行为 |
+|------|------|
+| 视频 + 封面都成功 | 正常完成，写入 registry |
+| 视频成功，封面失败 | 单独重试封面下载（重新解析 URL），不触发降级 |
+| 视频失败 | 触发降级下载，降级成功后下载视频和封面 |
+
+**封面图防盗链处理：**
+- 下载器添加 `Referer: https://hanime1.me/` 和 `User-Agent` 头
+- 解决 `vdownload.hembed.com` 图片资源 403 防盗链问题
+
+### 9. 六层中断恢复机制
 
 | 层级 | 触发场景 | 恢复方式 |
 |------|---------|---------|
@@ -115,12 +130,13 @@ Hanime 视频下载工具，使用 Chrome DevTools Protocol 进行网页抓取�
 - 双日志系统（下载失败 + 记录拒绝）
 - 自动重试与 URL 刷新
 - 降级下载机制（分辨率降级 + watch 页面提取）
+- 封面图防盗链处理（Referer 头）
 
 ## 项目结构
 
 ```
-hanime-dl-v2/
-├── main.go                    # 主程序入口（CLI 模式）
+hanime-dl-PRO/
+├── main.go                    # 主程序入口（CLI 模式 + Web 模式）
 ├── config/
 │   └── config.go              # 配置管理
 ├── chrome/
@@ -128,16 +144,16 @@ hanime-dl-v2/
 │   ├── chrome_unix.go         # Unix 平台实现
 │   └── chrome_windows.go      # Windows 平台实现
 ├── scraper/
-│   └── scraper.go             # 网页抓取（视频信息解析）
+│   └── scraper.go             # 网页抓取（视频信息解析 + 降级下载）
 ├── downloader/
-│   └── downloader.go          # 文件下载（断点续传、重试）
-├── verifier/                  # [新增] 文件完整性校验
+│   └── downloader.go          # 文件下载（断点续传、重试、防盗链头）
+├── verifier/                  # 文件完整性校验
 │   ├── verifier.go
 │   └── verifier_test.go
-├── registry/                  # [新增] 已完成视频记录
+├── registry/                  # 已完成视频记录
 │   ├── registry.go
 │   └── registry_test.go
-├── failurelog/                # [增强] 双日志系统
+├── failurelog/                # 双日志系统
 │   ├── failurelog.go
 │   └── failurelog_test.go
 ├── web/
@@ -161,8 +177,8 @@ hanime-dl-v2/
 ### 编译
 
 ```bash
-git clone https://github.com/mingk326/hanime-dl-v2.git
-cd hanime-dl-v2
+git clone https://github.com/mingk326/hanime-dl-PRO.git
+cd hanime-dl-PRO
 go mod download
 go build -o hanime-dl .
 ```
@@ -309,7 +325,7 @@ go test ./... -v
 
 ## 与原项目的对比
 
-| 维度 | 原项目 | V2 |
+| 维度 | 原项目 | PRO |
 |------|--------|-----|
 | 403/404 卡住时间 | 50 分钟 | 20 秒内 |
 | 下载失败追踪 | 仅控制台 | `Download-log.txt` 持久化 |
@@ -319,7 +335,17 @@ go test ./... -v
 | 已下载跳过 | 需重新解析网页 | 零网络请求，瞬间跳过 |
 | 失败恢复 | 不重试 | 自动重试 3 次 + URL 刷新 + 降级下载 |
 | 分辨率降级 | 不支持 | 1080p → 720p → 480p → 360p → 240p |
+| 封面图下载 | 无防盗链处理 | Referer 头绕过防盗链 |
+| 正常/降级分离 | 不适用 | 封面失败不误触发降级 |
 | 单元测试 | 0 个 | 62 个 |
+
+## 版本历史
+
+| 版本 | 主要内容 |
+|------|---------|
+| V1 | 基础下载功能 |
+| V2 | Registry、Verifier、双日志、自动重试 |
+| V3 (PRO) | 降级下载、封面图防盗链修复、正常/降级流程分离 |
 
 ## 相关项目
 
