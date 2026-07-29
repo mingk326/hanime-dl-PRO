@@ -518,7 +518,6 @@ func (ws *WebServer) processSingleTask(workerID int, task *TaskStatus) {
 			if _, e := os.Stat(meta.ImageFilePath); os.IsNotExist(e) {
 				if e := ws.downloader.DownloadWithRetry(meta.ImageURL, meta.ImageFilePath); e != nil {
 					log.Printf("[Worker %d] Image download failed for %s: %v", workerID, task.VideoID, e)
-					failurelog.Log(task.VideoID, fmt.Sprintf("封面图下载失败: %v", e))
 				}
 			}
 
@@ -526,15 +525,12 @@ func (ws *WebServer) processSingleTask(workerID int, task *TaskStatus) {
 			if _, e := os.Stat(meta.ImageFilePath); e == nil {
 				if vErr := verifier.Verify(meta.ImageFilePath); vErr != nil {
 					log.Printf("[Worker %d] Image verify failed for %s: %v", workerID, task.VideoID, vErr)
-					failurelog.Log(task.VideoID, fmt.Sprintf("封面图校验失败: %v", vErr))
 					if verifier.IsCorrupt(vErr) {
 						os.Remove(meta.ImageFilePath)
 						log.Printf("[Worker %d] Removed corrupt image: %s", workerID, meta.ImageFilePath)
 					}
 				}
 			}
-		} else {
-			failurelog.Log(task.VideoID, "封面图未下载: ImageURL 或 ImageFilePath 为空")
 		}
 
 		// === 检查下载地址 ===
@@ -695,7 +691,7 @@ func (ws *WebServer) processSingleTask(workerID int, task *TaskStatus) {
 
 				// 下载成功
 				log.Printf("[Worker %d] Fallback download succeeded at %s for %s",
-					workerID, link.Resolution, task.VideoID)
+						workerID, link.Resolution, task.VideoID)
 				failurelog.Log(task.VideoID, fmt.Sprintf("降级下载成功: 分辨率 %s", link.Resolution))
 
 				meta.DataURL = link.URL
@@ -707,13 +703,11 @@ func (ws *WebServer) processSingleTask(workerID int, task *TaskStatus) {
 						workerID, task.VideoID, meta.ImageURL)
 					if imgErr := ws.downloader.DownloadWithRetry(meta.ImageURL, meta.ImageFilePath); imgErr != nil {
 						log.Printf("[Worker %d] Fallback image download failed for %s: %v", workerID, task.VideoID, imgErr)
-						failurelog.Log(task.VideoID, fmt.Sprintf("降级下载: 封面图下载失败 %v", imgErr))
 					}
 				}
 				if _, e := os.Stat(meta.ImageFilePath); e == nil {
 					if vErr := verifier.Verify(meta.ImageFilePath); vErr != nil {
 						log.Printf("[Worker %d] Fallback image verify failed: %v", workerID, vErr)
-						failurelog.Log(task.VideoID, fmt.Sprintf("降级下载: 封面图校验失败 %v", vErr))
 						if verifier.IsCorrupt(vErr) {
 							os.Remove(meta.ImageFilePath)
 						}
@@ -721,24 +715,23 @@ func (ws *WebServer) processSingleTask(workerID int, task *TaskStatus) {
 				}
 			} else {
 				log.Printf("[Worker %d] Fallback: no ImageURL or ImageFilePath for %s (ImageURL=%s, ImageFilePath=%s)",
-				workerID, task.VideoID, meta.ImageURL, meta.ImageFilePath)
-				failurelog.Log(task.VideoID, "降级下载: 封面图 URL 为空，未下载封面图")
+					workerID, task.VideoID, meta.ImageURL, meta.ImageFilePath)
+			}
+
+				videoSuccess = true
+			isFallback = true
+			break
+			}
 		}
 
-			videoSuccess = true
-		isFallback = true
-		break
+		if !videoSuccess {
+			failurelog.Log(task.VideoID, fmt.Sprintf("重试 %d 次后仍下载失败（含降级下载）", maxRetries))
+			ws.mutateTask(task, func(t *TaskStatus) {
+				t.Status = "failed"
+				t.ErrorMessage = "重试及降级下载均失败"
+			})
+			return
 		}
-	}
-
-	if !videoSuccess {
-		failurelog.Log(task.VideoID, fmt.Sprintf("重试 %d 次后仍下载失败（含降级下载）", maxRetries))
-		ws.mutateTask(task, func(t *TaskStatus) {
-			t.Status = "failed"
-			t.ErrorMessage = "重试及降级下载均失败"
-		})
-		return
-	}
 	}
 
 	ws.finishTask(task)

@@ -205,7 +205,6 @@ func main() {
 					if _, err := os.Stat(currentMeta.ImageFilePath); os.IsNotExist(err) {
 						if imgErr := d.DownloadWithRetry(currentMeta.ImageURL, currentMeta.ImageFilePath); imgErr != nil {
 							log.Printf("[Worker %d] Image download failed for %s: %v", workerId, currentMeta.VideoID, imgErr)
-							failurelog.Log(currentMeta.VideoID, fmt.Sprintf("封面图下载失败: %v", imgErr))
 						}
 					}
 
@@ -213,15 +212,12 @@ func main() {
 					if _, err := os.Stat(currentMeta.ImageFilePath); err == nil {
 						if vErr := verifier.Verify(currentMeta.ImageFilePath); vErr != nil {
 							log.Printf("[Worker %d] Image verify failed for %s: %v", workerId, currentMeta.VideoID, vErr)
-							failurelog.Log(currentMeta.VideoID, fmt.Sprintf("封面图校验失败: %v", vErr))
 							if verifier.IsCorrupt(vErr) {
 								os.Remove(currentMeta.ImageFilePath)
 								log.Printf("[Worker %d] Removed corrupt image: %s", workerId, currentMeta.ImageFilePath)
 							}
 						}
 					}
-				} else {
-					failurelog.Log(currentMeta.VideoID, "封面图未下载: ImageURL 或 ImageFilePath 为空")
 				}
 
 					time.Sleep(3 * time.Second)
@@ -270,12 +266,10 @@ func main() {
 						}
 						if imgErr := d.DownloadWithRetry(currentMeta.ImageURL, currentMeta.ImageFilePath); imgErr != nil {
 							log.Printf("[Worker %d] Cover image download failed for %s: %v", workerId, currentMeta.VideoID, imgErr)
-							failurelog.Log(currentMeta.VideoID, fmt.Sprintf("封面图下载失败: %v", imgErr))
 						} else {
 							// 校验 jpg 图片完整性
 							if vErr := verifier.Verify(currentMeta.ImageFilePath); vErr != nil {
 								log.Printf("[Worker %d] Cover image verify failed for %s: %v", workerId, currentMeta.VideoID, vErr)
-								failurelog.Log(currentMeta.VideoID, fmt.Sprintf("封面图校验失败: %v", vErr))
 								if verifier.IsCorrupt(vErr) {
 									os.Remove(currentMeta.ImageFilePath)
 								}
@@ -285,194 +279,189 @@ func main() {
 				}
 
 				// 所有重试结束后仍未成功，尝试降级下载
-			if !videoSuccess {
-				log.Printf("[Worker %d] All retries exhausted, attempting fallback download for %s", workerId, currentMeta.VideoID)
+				if !videoSuccess {
+					log.Printf("[Worker %d] All retries exhausted, attempting fallback download for %s", workerId, currentMeta.VideoID)
 
-				fallbackLinks, fallbackImageURL, ferr := s.FallbackResolveDownloadURLs(wsURL, currentMeta.VideoID)
-				if ferr != nil {
-					log.Printf("[Worker %d] Fallback resolve failed for %s: %v", workerId, currentMeta.VideoID, ferr)
-					if logErr := failurelog.Log(currentMeta.VideoID,
-						fmt.Sprintf("降级下载失败: %v", ferr)); logErr != nil {
-						log.Printf("[Worker %d] Failed to write failure log: %v", workerId, logErr)
-					}
-				} else {
-					// 按优先级逐个尝试每个分辨率的下载链接
-					for _, link := range fallbackLinks {
-						// 记录降级日志：视频ID + 触发降级 + 降级到哪个分辨率
+					fallbackLinks, fallbackImageURL, ferr := s.FallbackResolveDownloadURLs(wsURL, currentMeta.VideoID)
+					if ferr != nil {
+						log.Printf("[Worker %d] Fallback resolve failed for %s: %v", workerId, currentMeta.VideoID, ferr)
 						if logErr := failurelog.Log(currentMeta.VideoID,
-							fmt.Sprintf("触发降级下载: 尝试分辨率 %s", link.Resolution)); logErr != nil {
-							log.Printf("[Worker %d] Failed to write fallback log: %v", workerId, logErr)
+							fmt.Sprintf("降级下载失败: %v", ferr)); logErr != nil {
+							log.Printf("[Worker %d] Failed to write failure log: %v", workerId, logErr)
 						}
+					} else {
+						// 按优先级逐个尝试每个分辨率的下载链接
+						for _, link := range fallbackLinks {
+							// 记录降级日志：视频ID + 触发降级 + 降级到哪个分辨率
+							if logErr := failurelog.Log(currentMeta.VideoID,
+								fmt.Sprintf("触发降级下载: 尝试分辨率 %s", link.Resolution)); logErr != nil {
+								log.Printf("[Worker %d] Failed to write fallback log: %v", workerId, logErr)
+							}
 
-						log.Printf("[Worker %d] Fallback: trying %s for %s", workerId, link.Resolution, currentMeta.VideoID)
+							log.Printf("[Worker %d] Fallback: trying %s for %s", workerId, link.Resolution, currentMeta.VideoID)
 
-						// 删除可能存在的残留文件
-						os.Remove(currentMeta.VideoFilePath)
-
-						// 下载视频
-						if dlErr := d.DownloadWithRetry(link.URL, currentMeta.VideoFilePath); dlErr != nil {
-							log.Printf("[Worker %d] Fallback download failed at %s for %s: %v",
-								workerId, link.Resolution, currentMeta.VideoID, dlErr)
+							// 删除可能存在的残留文件
 							os.Remove(currentMeta.VideoFilePath)
-							continue
-						}
 
-						// 校验 MP4
-						if vErr := verifier.Verify(currentMeta.VideoFilePath); vErr != nil {
-							log.Printf("[Worker %d] Fallback verify failed at %s for %s: %v",
-								workerId, link.Resolution, currentMeta.VideoID, vErr)
-							if verifier.IsCorrupt(vErr) {
+							// 下载视频
+							if dlErr := d.DownloadWithRetry(link.URL, currentMeta.VideoFilePath); dlErr != nil {
+								log.Printf("[Worker %d] Fallback download failed at %s for %s: %v",
+									workerId, link.Resolution, currentMeta.VideoID, dlErr)
 								os.Remove(currentMeta.VideoFilePath)
+								continue
 							}
-							continue
-						}
 
-						// 下载成功，记录降级成功日志
-						log.Printf("[Worker %d] Fallback download succeeded at %s for %s",
-							workerId, link.Resolution, currentMeta.VideoID)
-						failurelog.Log(currentMeta.VideoID,
-							fmt.Sprintf("降级下载成功: 分辨率 %s", link.Resolution))
-
-						// 更新 metadata 中的下载 URL
-						currentMeta.DataURL = link.URL
-
-						// 下载封面图（用 Go HTTP 客户端下载，不受 CORS 限制）
-					if fallbackImageURL != "" && currentMeta.ImageFilePath != "" {
-						if _, err := os.Stat(currentMeta.ImageFilePath); os.IsNotExist(err) {
-							log.Printf("[Worker %d] Fallback: downloading cover image for %s from %s",
-								workerId, currentMeta.VideoID, fallbackImageURL)
-							if imgErr := d.DownloadWithRetry(fallbackImageURL, currentMeta.ImageFilePath); imgErr != nil {
-								log.Printf("[Worker %d] Fallback image download failed for %s: %v", workerId, currentMeta.VideoID, imgErr)
-								failurelog.Log(currentMeta.VideoID,
-									fmt.Sprintf("降级下载: 封面图下载失败 %v", imgErr))
-							}
-						}
-						if _, err := os.Stat(currentMeta.ImageFilePath); err == nil {
-							if vErr := verifier.Verify(currentMeta.ImageFilePath); vErr != nil {
-								log.Printf("[Worker %d] Fallback image verify failed: %v", workerId, vErr)
-								failurelog.Log(currentMeta.VideoID,
-									fmt.Sprintf("降级下载: 封面图校验失败 %v", vErr))
+							// 校验 MP4
+							if vErr := verifier.Verify(currentMeta.VideoFilePath); vErr != nil {
+								log.Printf("[Worker %d] Fallback verify failed at %s for %s: %v",
+									workerId, link.Resolution, currentMeta.VideoID, vErr)
 								if verifier.IsCorrupt(vErr) {
-									os.Remove(currentMeta.ImageFilePath)
+									os.Remove(currentMeta.VideoFilePath)
 								}
+								continue
+							}
+
+							// 下载成功，记录降级成功日志
+							log.Printf("[Worker %d] Fallback download succeeded at %s for %s",
+								workerId, link.Resolution, currentMeta.VideoID)
+							failurelog.Log(currentMeta.VideoID,
+								fmt.Sprintf("降级下载成功: 分辨率 %s", link.Resolution))
+
+							// 更新 metadata 中的下载 URL
+							currentMeta.DataURL = link.URL
+
+							// 下载封面图（用 Go HTTP 客户端下载，不受 CORS 限制）
+						if fallbackImageURL != "" && currentMeta.ImageFilePath != "" {
+							if _, err := os.Stat(currentMeta.ImageFilePath); os.IsNotExist(err) {
+								log.Printf("[Worker %d] Fallback: downloading cover image for %s from %s",
+									workerId, currentMeta.VideoID, fallbackImageURL)
+								if imgErr := d.DownloadWithRetry(fallbackImageURL, currentMeta.ImageFilePath); imgErr != nil {
+									log.Printf("[Worker %d] Fallback image download failed for %s: %v", workerId, currentMeta.VideoID, imgErr)
+								}
+							}
+							if _, err := os.Stat(currentMeta.ImageFilePath); err == nil {
+								if vErr := verifier.Verify(currentMeta.ImageFilePath); vErr != nil {
+									log.Printf("[Worker %d] Fallback image verify failed: %v", workerId, vErr)
+									if verifier.IsCorrupt(vErr) {
+										os.Remove(currentMeta.ImageFilePath)
+									}
+								}
+							}
+						} else {
+							log.Printf("[Worker %d] Fallback: no cover image URL for %s", workerId, currentMeta.VideoID)
+						}
+
+							videoSuccess = true
+						isFallback = true
+						break
+						}
+					}
+
+					// 如果降级也失败
+					if !videoSuccess {
+						if logErr := failurelog.Log(currentMeta.VideoID,
+							fmt.Sprintf("重试 %d 次后仍下载失败（含降级下载）", maxRetries)); logErr != nil {
+							log.Printf("[Worker %d] Failed to write failure log: %v", workerId, logErr)
+						}
+					}
+				}
+
+				if videoSuccess && globalConfig.ClearCache {
+					cacheFile := filepath.Join(globalConfig.CacheDir, fmt.Sprintf("info_%s.json", currentMeta.VideoID))
+					os.Remove(cacheFile)
+					log.Printf("[Worker %d] Cleared cache for %s", workerId, currentMeta.VideoID)
+				}
+
+				// 下载成功后写入 registry 记录
+				if videoSuccess {
+					if isFallback {
+						// === 降级下载记录：只校验 MP4，JPG 可选，标记 Demotion ===
+						canRecord := true
+
+						if _, err := os.Stat(currentMeta.VideoFilePath); err != nil {
+							canRecord = false
+							reason := fmt.Sprintf("拒绝写入降级记录: MP4 文件不存在 %s", currentMeta.VideoFilePath)
+							log.Printf("[Worker %d] [Registry] %s", workerId, reason)
+							failurelog.LogReject(currentMeta.VideoID, reason)
+						} else if vErr := verifier.Verify(currentMeta.VideoFilePath); vErr != nil {
+							canRecord = false
+							reason := fmt.Sprintf("拒绝写入降级记录: MP4 校验失败 %v", vErr)
+							log.Printf("[Worker %d] [Registry] %s", workerId, reason)
+							failurelog.LogReject(currentMeta.VideoID, reason)
+						}
+
+						if canRecord {
+							if regErr := reg.RecordDemotion(currentMeta.VideoID, currentMeta.Title,
+								currentMeta.VideoFilePath, currentMeta.ImageFilePath,
+								globalConfig.VideoResolution); regErr != nil {
+								reason := fmt.Sprintf("拒绝写入降级记录: %v", regErr)
+								log.Printf("[Worker %d] [Registry] %s", workerId, reason)
+								failurelog.LogReject(currentMeta.VideoID, reason)
+							} else {
+								log.Printf("[Worker %d] Recorded to registry (demotion): %s", workerId, currentMeta.VideoID)
 							}
 						}
 					} else {
-						log.Printf("[Worker %d] Fallback: no cover image URL for %s", workerId, currentMeta.VideoID)
-						failurelog.Log(currentMeta.VideoID, "降级下载: 封面图 URL 为空，未下载封面图")
-					}
-
-						videoSuccess = true
-					isFallback = true
-					break
-					}
-				}
-
-				// 如果降级也失败
-				if !videoSuccess {
-					if logErr := failurelog.Log(currentMeta.VideoID,
-						fmt.Sprintf("重试 %d 次后仍下载失败（含降级下载）", maxRetries)); logErr != nil {
-						log.Printf("[Worker %d] Failed to write failure log: %v", workerId, logErr)
-					}
-				}
-			}
-
-				if videoSuccess && globalConfig.ClearCache {
-				cacheFile := filepath.Join(globalConfig.CacheDir, fmt.Sprintf("info_%s.json", currentMeta.VideoID))
-				os.Remove(cacheFile)
-				log.Printf("[Worker %d] Cleared cache for %s", workerId, currentMeta.VideoID)
-			}
-
-			// 下载成功后写入 registry 记录
-			if videoSuccess {
-				if isFallback {
-					// === 降级下载记录：只校验 MP4，JPG 可选，标记 Demotion ===
+					// === 正常下载记录：MP4 必须存在，JPG 失败则降级为 Demotion 记录 ===
 					canRecord := true
 
+					// 最终确认 MP4 文件存在且通过校验
 					if _, err := os.Stat(currentMeta.VideoFilePath); err != nil {
 						canRecord = false
-						reason := fmt.Sprintf("拒绝写入降级记录: MP4 文件不存在 %s", currentMeta.VideoFilePath)
+						reason := fmt.Sprintf("拒绝写入完成记录: MP4 文件不存在 %s", currentMeta.VideoFilePath)
 						log.Printf("[Worker %d] [Registry] %s", workerId, reason)
 						failurelog.LogReject(currentMeta.VideoID, reason)
 					} else if vErr := verifier.Verify(currentMeta.VideoFilePath); vErr != nil {
 						canRecord = false
-						reason := fmt.Sprintf("拒绝写入降级记录: MP4 校验失败 %v", vErr)
+						reason := fmt.Sprintf("拒绝写入完成记录: MP4 校验失败 %v", vErr)
 						log.Printf("[Worker %d] [Registry] %s", workerId, reason)
 						failurelog.LogReject(currentMeta.VideoID, reason)
 					}
 
 					if canRecord {
-						if regErr := reg.RecordDemotion(currentMeta.VideoID, currentMeta.Title,
-							currentMeta.VideoFilePath, currentMeta.ImageFilePath,
-							globalConfig.VideoResolution); regErr != nil {
-							reason := fmt.Sprintf("拒绝写入降级记录: %v", regErr)
-							log.Printf("[Worker %d] [Registry] %s", workerId, reason)
-							failurelog.LogReject(currentMeta.VideoID, reason)
-						} else {
-							log.Printf("[Worker %d] Recorded to registry (demotion): %s", workerId, currentMeta.VideoID)
-						}
-					}
-				} else {
-				// === 正常下载记录：MP4 必须存在，JPG 失败则降级为 Demotion 记录 ===
-				canRecord := true
-
-				// 最终确认 MP4 文件存在且通过校验
-				if _, err := os.Stat(currentMeta.VideoFilePath); err != nil {
-					canRecord = false
-					reason := fmt.Sprintf("拒绝写入完成记录: MP4 文件不存在 %s", currentMeta.VideoFilePath)
-					log.Printf("[Worker %d] [Registry] %s", workerId, reason)
-					failurelog.LogReject(currentMeta.VideoID, reason)
-				} else if vErr := verifier.Verify(currentMeta.VideoFilePath); vErr != nil {
-					canRecord = false
-					reason := fmt.Sprintf("拒绝写入完成记录: MP4 校验失败 %v", vErr)
-					log.Printf("[Worker %d] [Registry] %s", workerId, reason)
-					failurelog.LogReject(currentMeta.VideoID, reason)
-				}
-
-				if canRecord {
-					// 检查 JPG 是否存在且通过校验
-					jpgOK := false
-					if currentMeta.ImageFilePath != "" {
-						if _, err := os.Stat(currentMeta.ImageFilePath); err == nil {
-							if vErr := verifier.Verify(currentMeta.ImageFilePath); vErr == nil {
-								jpgOK = true
-							} else {
-								log.Printf("[Worker %d] [Registry] JPG 校验失败，降级为 Demotion 记录: %s", workerId, currentMeta.VideoID)
-								if verifier.IsCorrupt(vErr) {
-									os.Remove(currentMeta.ImageFilePath)
+						// 检查 JPG 是否存在且通过校验
+						jpgOK := false
+						if currentMeta.ImageFilePath != "" {
+							if _, err := os.Stat(currentMeta.ImageFilePath); err == nil {
+								if vErr := verifier.Verify(currentMeta.ImageFilePath); vErr == nil {
+									jpgOK = true
+								} else {
+									log.Printf("[Worker %d] [Registry] JPG 校验失败，降级为 Demotion 记录: %s", workerId, currentMeta.VideoID)
+									if verifier.IsCorrupt(vErr) {
+										os.Remove(currentMeta.ImageFilePath)
+									}
 								}
+							} else {
+								log.Printf("[Worker %d] [Registry] JPG 不存在，降级为 Demotion 记录: %s", workerId, currentMeta.VideoID)
+							}
+						}
+
+						if jpgOK {
+							// MP4 + JPG 都正常，写入正常记录
+							if regErr := reg.Record(currentMeta.VideoID, currentMeta.Title,
+								currentMeta.VideoFilePath, currentMeta.ImageFilePath,
+								globalConfig.VideoResolution); regErr != nil {
+								reason := fmt.Sprintf("拒绝写入完成记录: %v", regErr)
+								log.Printf("[Worker %d] [Registry] %s", workerId, reason)
+								failurelog.LogReject(currentMeta.VideoID, reason)
+							} else {
+								log.Printf("[Worker %d] Recorded to registry: %s", workerId, currentMeta.VideoID)
 							}
 						} else {
-							log.Printf("[Worker %d] [Registry] JPG 不存在，降级为 Demotion 记录: %s", workerId, currentMeta.VideoID)
+							// MP4 正常但 JPG 缺失/损坏，降级为 Demotion 记录（JPG 可选）
+							if regErr := reg.RecordDemotion(currentMeta.VideoID, currentMeta.Title,
+								currentMeta.VideoFilePath, currentMeta.ImageFilePath,
+								globalConfig.VideoResolution); regErr != nil {
+								reason := fmt.Sprintf("拒绝写入降级记录: %v", regErr)
+								log.Printf("[Worker %d] [Registry] %s", workerId, reason)
+								failurelog.LogReject(currentMeta.VideoID, reason)
+							} else {
+								log.Printf("[Worker %d] Recorded to registry (demotion, JPG missing): %s", workerId, currentMeta.VideoID)
+							}
 						}
 					}
-
-					if jpgOK {
-						// MP4 + JPG 都正常，写入正常记录
-						if regErr := reg.Record(currentMeta.VideoID, currentMeta.Title,
-							currentMeta.VideoFilePath, currentMeta.ImageFilePath,
-							globalConfig.VideoResolution); regErr != nil {
-							reason := fmt.Sprintf("拒绝写入完成记录: %v", regErr)
-							log.Printf("[Worker %d] [Registry] %s", workerId, reason)
-							failurelog.LogReject(currentMeta.VideoID, reason)
-						} else {
-							log.Printf("[Worker %d] Recorded to registry: %s", workerId, currentMeta.VideoID)
-						}
-					} else {
-						// MP4 正常但 JPG 缺失/损坏，降级为 Demotion 记录（JPG 可选）
-						if regErr := reg.RecordDemotion(currentMeta.VideoID, currentMeta.Title,
-							currentMeta.VideoFilePath, currentMeta.ImageFilePath,
-							globalConfig.VideoResolution); regErr != nil {
-							reason := fmt.Sprintf("拒绝写入降级记录: %v", regErr)
-							log.Printf("[Worker %d] [Registry] %s", workerId, reason)
-							failurelog.LogReject(currentMeta.VideoID, reason)
-						} else {
-							log.Printf("[Worker %d] Recorded to registry (demotion, JPG missing): %s", workerId, currentMeta.VideoID)
-						}
 					}
 				}
-			}
-			}
 
 				// 更新播放列表进度
 				if videoSuccess && currentMeta.ListID != "" {
