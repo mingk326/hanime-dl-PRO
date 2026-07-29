@@ -52,13 +52,13 @@ Hanime 视频下载工具，使用 Chrome DevTools Protocol 进行网页抓取�
 
 ```
 ./log/
-  ├── Download-log.txt    ← 下载失败日志（解析失败、下载失败、校验失败、重试耗尽、封面图失败）
+  ├── Download-log.txt    ← 下载失败日志（解析失败、下载失败、校验失败、重试耗尽）
   └── Completed-log.txt   ← 记录拒绝日志（MP4/JPG 缺失或校验失败导致拒绝写入完成记录）
 ```
 
 两个日志各有独立 mutex，互不干扰，格式统一为 `[时间] videoID=<ID> reason=<原因>`。
 
-**封面图失败记录：** 只要 JPG 封面图未成功下载/校验，就会写入 `Download-log.txt`，覆盖正常下载和降级下载两种场景。
+**封面图失败不记录日志：** 封面图（JPG）下载失败或校验失败时不再写入 `Download-log.txt`，仅在控制台输出，避免大量封面失败信息污染下载失败日志。
 
 ### 5. 自动重试机制
 
@@ -94,7 +94,7 @@ Hanime 视频下载工具，使用 Chrome DevTools Protocol 进行网页抓取�
 - 触发降级时记录：`videoID=XXX reason=触发降级下载: 尝试分辨率 720p`
 - 降级成功时记录：`videoID=XXX reason=降级下载成功: 分辨率 720p`
 - 降级下载的视频同样走 `verifier` 校验 + `registry` 记录（JPG 缺失时标记为 `demotion: true`）
-- 降级时封面图未下载/校验失败同样记录到 `Download-log.txt`
+- 降级时封面图未下载/校验失败仅输出控制台日志，不记录到 `Download-log.txt`
 
 **封面图保障：**
 - 降级时优先从下载页面 `img.download-image` 的 `src` 提取新鲜封面图 URL
@@ -359,6 +359,7 @@ go test ./... -v
 | V2 | Registry、Verifier、双日志、自动重试 |
 | V3 (PRO) | 降级下载、封面图防盗链修复、正常/降级流程分离 |
 | V3.1 (PRO) | 降级下载视频正常记录（Demotion 标记）、JPG 未下载写入 Download-log |
+| V3.2 (PRO) | 封面图下载失败不再记录到 Download-log.txt，仅保留控制台输出 |
 
 ## 相关链接
 
