@@ -1,16 +1,28 @@
 package downloader
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"time"
 )
+
+// forceIPv4Dialer 返回一个仅使用 IPv4 的拨号器。
+// 部分 CDN（如 vdownload.hembed.com）的 IPv6 连接会被强制断开，
+// 强制走 IPv4 可避免下载失败。
+func forceIPv4Dialer() func(ctx context.Context, network, addr string) (net.Conn, error) {
+	d := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return d.DialContext(ctx, "tcp4", addr)
+	}
+}
 
 const (
 	MaxRetries    = 5
@@ -154,7 +166,8 @@ func (d *Downloader) downloadFile(urlStr, filePath string, cb ProgressCallback) 
 
 	// 配置代理
 	tr := &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
+		Proxy:       http.ProxyFromEnvironment,
+		DialContext: forceIPv4Dialer(),
 	}
 	if d.proxyURL != "" {
 		pUrl, err := url.Parse(d.proxyURL)
