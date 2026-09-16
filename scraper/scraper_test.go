@@ -187,3 +187,53 @@ func TestSanitizeFilename_RealWorldExamples(t *testing.T) {
 		})
 	}
 }
+
+// buildTaggedBase 复现 ResolveVideoInfo 中的文件名拼接逻辑：先拼 [ID]标题[标签1][标签2]...，
+// 再统一 sanitize。便于在无浏览器环境下验证标签文件名行为。
+func buildTaggedBase(videoID, title string, tags []string, maxBytes int) string {
+	raw := "[" + videoID + "]" + title
+	for _, t := range tags {
+		t = strings.TrimSpace(t)
+		if t != "" {
+			raw += "[" + t + "]"
+		}
+	}
+	return sanitizeFilename(raw, maxBytes, "unnamed")
+}
+
+// TestTagFilename_Format 验证 [ID]标题[标签][标签] 格式在安全化后保持不变
+func TestTagFilename_Format(t *testing.T) {
+	got := buildTaggedBase("408264", "ルーシー", []string{"ティファ", "百合", "1080p"}, 200)
+	want := "[408264]ルーシー[ティファ][百合][1080p]"
+	if got != want {
+		t.Errorf("format: got %q, want %q", got, want)
+	}
+}
+
+// TestTagFilename_IllegalCharInTag 验证标签内的 Windows 非法字符被替换为下划线
+func TestTagFilename_IllegalCharInTag(t *testing.T) {
+	got := buildTaggedBase("1", "T", []string{"tag/with\\slash", "a:b*c"}, 200)
+	want := "[1]T[tag_with_slash][a_b_c]"
+	if got != want {
+		t.Errorf("illegal char in tag: got %q, want %q", got, want)
+	}
+}
+
+// TestTagFilename_TruncateKeepsTitleAndEarlyTags 验证 200 字节截断时标题与靠前标签优先保留，
+// 靠后标签被丢弃。
+func TestTagFilename_TruncateKeepsTitleAndEarlyTags(t *testing.T) {
+	longTitle := strings.Repeat("あ", 40) // 40*3=120 字节
+	tags := []string{"标签1", "标签2", "标签3", "标签4"}
+	got := buildTaggedBase("99", longTitle, tags, 200)
+	if len(got) > 200 {
+		t.Errorf("truncate: got length %d, must be <= 200", len(got))
+	}
+	// 标题 + 前缀必须保留
+	if !strings.HasPrefix(got, "[99]"+longTitle) {
+		t.Errorf("title should be preserved first, got %q", got)
+	}
+	// 靠前标签保留部分；靠后的可能被截掉，但不应出现 [标签4] 在标题前
+	if strings.Index(got, "[标签1]") < strings.Index(got, longTitle) {
+		t.Errorf("early tag should come after title, got %q", got)
+	}
+}

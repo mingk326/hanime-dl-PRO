@@ -141,21 +141,23 @@ func navigateAction(navURL string) chromedp.Action {
 
 // Result 视频解析结果
 type Result struct {
-	Title    string `json:"title"`
-	ImageURL string `json:"image_url"`
-	DataURL  string `json:"data_url"`
+	Title    string   `json:"title"`
+	ImageURL string   `json:"image_url"`
+	DataURL  string   `json:"data_url"`
+	Tags     []string `json:"tags"`
 }
 
 // VideoMetadata 视频元数据
 type VideoMetadata struct {
-	VideoID       string `json:"video_id"`
-	Title         string `json:"title"`
-	ImageURL      string `json:"image_url"`
-	DataURL       string `json:"data_url"`
-	ImageFilePath string `json:"image_file_path"`
-	VideoFilePath string `json:"video_file_path"`
-	TargetDir     string `json:"target_dir"`
-	ListID        string `json:"list_id"`
+	VideoID       string   `json:"video_id"`
+	Title         string   `json:"title"`
+	ImageURL      string   `json:"image_url"`
+	DataURL       string   `json:"data_url"`
+	ImageFilePath string   `json:"image_file_path"`
+	VideoFilePath string   `json:"video_file_path"`
+	TargetDir     string   `json:"target_dir"`
+	ListID        string   `json:"list_id"`
+	Tags          []string `json:"tags"`
 }
 
 // Scraper 网页抓取器
@@ -386,6 +388,13 @@ func (s *Scraper) ResolveVideoInfo(wsURL, videoID, listID string) (VideoMetadata
 
 	// 构建元数据
 	title := strings.TrimSpace(res.Title)
+
+	// 提取视频标签（品牌/角色/分类），来自 watch 页 .video-tags-wrapper .single-video-tag
+	// 失败不致命：取不到标签时文件名退化为不含标签的旧格式
+	if tagErr := extractVideoTags(ctx, videoID, &res.Tags); tagErr == nil && len(res.Tags) > 0 {
+		log.Printf("Extracted %d tags for %s", len(res.Tags), videoID)
+	}
+
 	var dirName string
 
 	if strings.HasPrefix(title, "(") {
@@ -407,11 +416,20 @@ func (s *Scraper) ResolveVideoInfo(wsURL, videoID, listID string) (VideoMetadata
 	fullDir := filepath.Join(s.downDir, dirName)
 	os.MkdirAll(fullDir, 0755)
 
-	// 文件名格式：[视频ID]标题，如 [407238]ルーシーとモルス
-	// 先拼接前缀和标题，再统一做 Windows 安全化处理（截断、非法字符替换等）。
-	// 前缀 [视频ID] 是 ASCII，在 sanitizeFilename 的 200 字节截断中不会被破坏
-	// （最坏情况下截断发生在标题部分，前缀完整保留）。
-	fileNameBase := sanitizeFilename(fmt.Sprintf("[%s]%s", videoID, title), 200, "unnamed")
+	// 文件名格式：[视频ID]标题[标签1][标签2]...，标签拼在标题后。
+	// 拼接后统一 sanitize（200 字节截断从开头保留，保证 [ID] 前缀与标题优先，
+	// 超出部分截掉的是靠后的标签，符合"尽量全部但标题优先"）。
+	rawBase := fmt.Sprintf("[%s]%s", videoID, title)
+	seen := make(map[string]bool)
+	for _, t := range res.Tags {
+		t = strings.TrimSpace(t)
+		if t == "" || seen[t] {
+			continue
+		}
+		seen[t] = true
+		rawBase += "[" + t + "]"
+	}
+	fileNameBase := sanitizeFilename(rawBase, 200, "unnamed")
 
 	meta := VideoMetadata{
 		VideoID:       videoID,
@@ -430,6 +448,34 @@ func (s *Scraper) ResolveVideoInfo(wsURL, videoID, listID string) (VideoMetadata
 	}
 
 	return meta, nil
+}
+
+// extractVideoTags 从 watch 页提取视频标签（品牌/角色/分类）。标签从
+// .video-tags-wrapper .single-video-tag a 的 href 参数读取：
+//   - /search?query=XXX       → 品牌/系列/角色标签
+//   - /search?tags[]=XXX      → 分类标签（1080p/无码/百合 等）
+//
+// 直接取 href 参数而非文本，可避开文本中的 "#" 前缀与 "(1)" 数量后缀。
+// 失败返回 error，由调用方忽略（取不到标签不阻塞下载）。
+func extractVideoTags(ctx context.Context, videoID string, tags *[]string) error {
+	tagCtx, tagCancel := context.WithTimeout(ctx, 25*time.Second)
+	defer tagCancel()
+
+	return chromedp.Run(tagCtx,
+		navigateAction(fmt.Sprintf("https://hanime1.me/watch?v=%s", videoID)),
+		chromedp.Sleep(2*time.Second),
+		chromedp.Evaluate(`
+			Array.from(document.querySelectorAll('.video-tags-wrapper .single-video-tag a')).map(a => {
+				let href = a.getAttribute('href') || '';
+				let name = '';
+				try {
+					let u = new URL(href, location.origin);
+					name = u.searchParams.get('query') || u.searchParams.get('tags[]') || '';
+				} catch (e) {}
+				return name.trim();
+			}).filter(x => x.length > 0)
+		`, tags),
+	)
 }
 
 // RefreshVideoDataURL 刷新视频下载 URL
