@@ -17,10 +17,15 @@ log/
 
 # Config (contains user-specific settings)
 config.yaml
+*_config.yaml
+
+# Build artifacts
+release/
 
 # Logs
 *.log
 log.txt
+run_output*.txt
 
 # IDE
 .idea/
